@@ -1,6 +1,6 @@
 streamlit
+streamlit-webrtc
 opencv-python-headless
 mediapipe
-transformers
-requests
-Pillow
+av
+numpy
