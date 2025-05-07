@@ -1,121 +1,76 @@
 import streamlit as st
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
-import av
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
 import cv2
-import mediapipe as mp
 import numpy as np
-import time
+import math
+import mediapipe as mp
 
-# Initialize Mediapipe
+st.title("AI Proctoring System")
+
+# Load face detector
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
+mouth_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_mcs_mouth.xml')
+
 mp_face_mesh = mp.solutions.face_mesh
-mp_drawing = mp.solutions.drawing_utils
-mp_pose = mp.solutions.pose
+face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1)
 
-# Global activity log
-activity_log = []
-
-# FaceMesh & Pose initialization
-face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1, min_detection_confidence=0.5)
-pose = mp_pose.Pose(static_image_mode=False, min_detection_confidence=0.5)
-
-class VideoProcessor(VideoProcessorBase):
+class VideoTransformer(VideoTransformerBase):
     def __init__(self):
-        self.start_time = time.time()
-        self.window_switch_count = 0
-        self.last_window_time = time.time()
-        self.face_time = 0
+        self.cheating_detected = False
+        self.mouth_open = False
 
-    def recv(self, frame):
+    def transform(self, frame):
         img = frame.to_ndarray(format="bgr24")
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-        report = []
-
-        # Face landmarks detection
-        face_results = face_mesh.process(img_rgb)
-        if face_results.multi_face_landmarks:
-            report.append("✅ Face detected")
-            self.face_time += 1
-
-            for landmarks in face_results.multi_face_landmarks:
-                mp_drawing.draw_landmarks(img, landmarks, mp_face_mesh.FACEMESH_CONTOURS)
-
-                # Eye open detection (landmark index for upper/lower eyelid)
-                left_eye_top = landmarks.landmark[386]
-                left_eye_bottom = landmarks.landmark[374]
-                eye_distance = abs(left_eye_top.y - left_eye_bottom.y)
-                if eye_distance < 0.01:
-                    report.append("⚠️ Left eye closed")
-
-                # Mouth open detection
-                upper_lip = landmarks.landmark[13]
-                lower_lip = landmarks.landmark[14]
-                lip_distance = abs(upper_lip.y - lower_lip.y)
-                if lip_distance > 0.03:
-                    report.append("⚠️ Mouth open detected")
-
-        else:
-            report.append("❌ No face detected")
-
-        # Head pose estimation
-        pose_results = pose.process(img_rgb)
-        if pose_results.pose_landmarks:
-            nose_y = pose_results.pose_landmarks.landmark[mp_pose.PoseLandmark.NOSE].y
-            left_ear_y = pose_results.pose_landmarks.landmark[mp_pose.PoseLandmark.LEFT_EAR].y
-            if abs(nose_y - left_ear_y) > 0.05:
-                report.append("⚠️ Head tilted")
-
-        # Phone detection (basic rectangle detection as placeholder)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        phones = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, 1.2, 100)
-        if phones is not None:
-            report.append("📱 Phone-like object detected")
+        faces = face_cascade.detectMultiScale(gray, 1.3, 5)
 
-        # Draw report messages on frame
-        y_offset = 30
-        for r in report:
-            cv2.putText(img, r, (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            y_offset += 30
+        for (x, y, w, h) in faces:
+            cv2.rectangle(img, (x,y), (x+w, y+h), (255,0,0), 2)
 
-        # Append to log
-        timestamp = time.strftime("%H:%M:%S", time.localtime())
-        for r in report:
-            activity_log.append(f"[{timestamp}] {r}")
+            roi_gray = gray[y:y+h, x:x+w]
+            roi_color = img[y:y+h, x:x+w]
 
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
+            # Eye detection
+            eyes = eye_cascade.detectMultiScale(roi_gray)
+            for (ex, ey, ew, eh) in eyes:
+                cv2.rectangle(roi_color, (ex, ey), (ex+ew, ey+eh), (0,255,0), 2)
 
-st.set_page_config(page_title="🖥️ Smart Proctored Mock Test")
+            # Mouth detection
+            mouth = mouth_cascade.detectMultiScale(roi_gray, 1.7, 11)
+            for (mx, my, mw, mh) in mouth:
+                if my > h / 2:  # only consider mouth in lower half
+                    cv2.rectangle(roi_color, (mx, my), (mx+mw, my+mh), (0,0,255), 2)
+                    self.mouth_open = True
+                else:
+                    self.mouth_open = False
 
-st.title("🎓 Smart Proctored Mock Test System")
-st.write("👉 This proctored test monitors your face, eyes, head, mouth & phone detection in real-time. Allow webcam access to start.")
+        # Head pose detection
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        results = face_mesh.process(img_rgb)
 
-duration = st.selectbox("Select test duration (minutes):", [1, 3, 10, 20])
-duration_seconds = duration * 60
+        if results.multi_face_landmarks:
+            for face_landmarks in results.multi_face_landmarks:
+                left_eye = face_landmarks.landmark[33]
+                right_eye = face_landmarks.landmark[263]
 
-start_test = st.button("✅ Start Test")
+                dx = right_eye.x - left_eye.x
+                dy = right_eye.y - left_eye.y
+                angle = math.degrees(math.atan2(dy, dx))
 
-if start_test:
-    st.warning("⚠️ Please allow webcam access in browser popup to proceed.")
+                if abs(angle) > 15:
+                    self.cheating_detected = True
+                    cv2.putText(img, f"Head turned ({int(angle)} deg)", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
+                else:
+                    self.cheating_detected = False
 
-    processor = webrtc_streamer(
-        key="exam-proctor",
-        video_processor_factory=VideoProcessor,
-        media_stream_constraints={"video": True, "audio": False},
-    )
+        if self.mouth_open:
+            cv2.putText(img, "Mouth Open Detected!", (10,60), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
 
-    start_time = time.time()
+        if len(faces) == 0:
+            cv2.putText(img, "No face detected!", (10,90), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
 
-    while time.time() - start_time < duration_seconds:
-        time.sleep(1)
+        return img
 
-    st.success("🎉 Test completed!")
-
-    # Generate downloadable report
-    st.subheader("📊 Proctoring Report")
-    unique_logs = list(set(activity_log))
-    for log in unique_logs:
-        st.write(f"- {log}")
-
-    report_text = "\n".join(unique_logs)
-    st.download_button("📥 Download Report", report_text, file_name="Proctoring_Report.txt")
-
+webrtc_streamer(key="proctoring", video_transformer_factory=VideoTransformer)
