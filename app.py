@@ -5,6 +5,7 @@ import os
 import groq
 import json
 from datetime import datetime
+from streamlit_js_eval import streamlit_js_eval
 
 # Load API keys
 GOOGLE_VISION_API_KEY = os.getenv("GOOGLE_VISION_API_KEY")
@@ -23,19 +24,11 @@ def log_event(event_type, details=""):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     st.session_state.logs.append({"time": timestamp, "event": event_type, "details": details})
 
-# Inject JavaScript for tab-switch detection
-st.components.v1.html("""
-<script>
-    document.addEventListener("visibilitychange", function() {
-        if (document.hidden) {
-            fetch("/_stcore/streamlit/message?tab_switch=true", {method: "POST"});
-        }
-    });
-</script>
-""", height=0)
+# Detect tab switch using streamlit-js-eval
+result = streamlit_js_eval(js_expressions="document.visibilityState", key="vis_state")
 
-if st.experimental_get_query_params().get("tab_switch"):
-    log_event("Tab Switch Detected", "User switched away from the exam tab!")
+if result == "hidden":
+    log_event("Tab Switch Detected", "User switched away from exam tab!")
     st.warning("⚠️ Tab switch detected! Please stay on this exam tab.")
 
 # =========================
