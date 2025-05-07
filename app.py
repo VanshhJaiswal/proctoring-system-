@@ -5,10 +5,9 @@ import mediapipe as mp
 import time
 import os
 import requests
-from PIL import Image
 from transformers import pipeline
 
-# Load Groq API Key from .env or Streamlit secrets
+# Load Groq API Key
 GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY"))
 
 # Initialize Mediapipe
@@ -21,13 +20,12 @@ pose = mp_pose.Pose()
 
 qa_pipeline = pipeline("question-answering", model="distilbert-base-cased-distilled-squad")
 
-# Proctoring metrics
+# Metrics
 face_present_count = 0
 mouth_open_count = 0
 head_movement_count = 0
 window_switch_count = 0
 total_frames = 0
-
 activity_log = []
 
 def detect_features(image):
@@ -84,30 +82,60 @@ def generate_mock_questions():
 
     return result['choices'][0]['message']['content']
 
+def webcam_preview():
+    st.subheader("🎥 Camera Preview - Please allow camera access")
+    stframe = st.empty()
+    camera = cv2.VideoCapture(0)
+    preview_start = time.time()
+    access_granted = False
+
+    while time.time() - preview_start < 5:  # 5 seconds preview
+        ret, frame = camera.read()
+        if not ret:
+            continue
+        frame = cv2.flip(frame, 1)
+        stframe.image(frame, channels="BGR")
+        access_granted = True
+
+    camera.release()
+    return access_granted
+
 def run_test():
     global window_switch_count
     st.title("🎓 Smart Proctored Mock Test")
-    st.write("Please allow camera access. The system will monitor face, mouth, head movements and window focus.")
 
     duration_option = st.selectbox("Select Test Duration", ["1 min", "3 min", "10 min", "20 min"])
     duration_seconds = {"1 min":60, "3 min":180, "10 min":600, "20 min":1200}[duration_option]
 
+    # Check camera preview
+    access_granted = webcam_preview()
+    if not access_granted:
+        st.error("⚠️ Could not access webcam. Please allow camera permission and refresh.")
+        return
+
+    st.success("✅ Camera access confirmed. You can start the test.")
+
     if st.button("Start Test"):
-        mock_questions = generate_mock_questions()
-        if not mock_questions:
+        mock_questions_text = generate_mock_questions()
+        if not mock_questions_text:
             return
 
         st.subheader("📄 AI-Generated Mock Test")
-        st.markdown(mock_questions)
+        questions = mock_questions_text.strip().split('\n\n')
+        user_answers = {}
+
+        for idx, q in enumerate(questions):
+            st.markdown(f"**Q{idx+1}:** {q.splitlines()[0]}")
+            options = [opt.strip() for opt in q.splitlines()[1:5]]
+            user_answers[idx] = st.radio(f"Select your answer for Q{idx+1}:", options, key=f"q{idx+1}")
+
+        st.warning("⚠️ Don't switch windows during the test! Window switch will be counted.")
+        st.info("👉 Keep your face visible for monitoring.")
 
         stframe = st.empty()
         camera = cv2.VideoCapture(0)
         start_time = time.time()
 
-        st.info("⚠️ Don't switch windows during the test! Window switch will be counted.")
-        st.warning("⚠️ Keep face visible for proctoring.")
-
-        # JavaScript to detect window blur
         window_event_script = """
             <script>
             let count = 0;
@@ -130,7 +158,6 @@ def run_test():
 
             stframe.image(frame, channels="BGR")
 
-            # Check query params for window switch
             query_params = st.experimental_get_query_params()
             if "window_switch" in query_params:
                 window_switch_count = int(query_params["window_switch"][0])
@@ -138,7 +165,6 @@ def run_test():
         camera.release()
         st.success("✅ Test completed.")
 
-        # Report generation
         st.subheader("📊 Proctoring Report")
         face_time_percent = (face_present_count / total_frames) * 100 if total_frames else 0
 
@@ -149,8 +175,13 @@ def run_test():
             f"🖥️ Window switches detected: {window_switch_count}",
             "",
             "Activity Log:",
-            *list(set(activity_log))
+            *list(set(activity_log)),
+            "",
+            "User Answers:"
         ]
+        for q_idx, answer in user_answers.items():
+            report_lines.append(f"Q{q_idx+1}: {answer}")
+
         for line in report_lines:
             st.write("- " + line)
 
