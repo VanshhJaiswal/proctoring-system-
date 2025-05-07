@@ -1,195 +1,121 @@
 import streamlit as st
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
+import av
 import cv2
-import numpy as np
 import mediapipe as mp
+import numpy as np
 import time
-import os
-import requests
-from transformers import pipeline
-
-# Load Groq API Key
-GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY"))
 
 # Initialize Mediapipe
 mp_face_mesh = mp.solutions.face_mesh
 mp_drawing = mp.solutions.drawing_utils
-face_mesh = mp_face_mesh.FaceMesh(min_detection_confidence=0.5, min_tracking_confidence=0.5)
-
 mp_pose = mp.solutions.pose
-pose = mp_pose.Pose()
 
-qa_pipeline = pipeline("question-answering", model="distilbert-base-cased-distilled-squad")
-
-# Metrics
-face_present_count = 0
-mouth_open_count = 0
-head_movement_count = 0
-window_switch_count = 0
-total_frames = 0
+# Global activity log
 activity_log = []
 
-def detect_features(image):
-    global face_present_count, mouth_open_count, head_movement_count, total_frames
-    img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    detections = []
-    total_frames += 1
+# FaceMesh & Pose initialization
+face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1, min_detection_confidence=0.5)
+pose = mp_pose.Pose(static_image_mode=False, min_detection_confidence=0.5)
 
-    face_results = face_mesh.process(img_rgb)
-    if face_results.multi_face_landmarks:
-        detections.append("✅ Face detected")
-        face_present_count += 1
+class VideoProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.start_time = time.time()
+        self.window_switch_count = 0
+        self.last_window_time = time.time()
+        self.face_time = 0
 
-        for landmarks in face_results.multi_face_landmarks:
-            upper_lip = landmarks.landmark[13]
-            lower_lip = landmarks.landmark[14]
-            lip_distance = abs(upper_lip.y - lower_lip.y)
-            if lip_distance > 0.03:
-                detections.append("⚠️ Mouth open")
-                mouth_open_count += 1
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-    else:
-        detections.append("❌ Face not detected")
+        report = []
 
-    pose_results = pose.process(img_rgb)
-    if pose_results.pose_landmarks:
-        nose_y = pose_results.pose_landmarks.landmark[mp_pose.PoseLandmark.NOSE].y
-        left_ear_y = pose_results.pose_landmarks.landmark[mp_pose.PoseLandmark.LEFT_EAR].y
-        if abs(nose_y - left_ear_y) > 0.05:
-            detections.append("⚠️ Head tilted")
-            head_movement_count += 1
+        # Face landmarks detection
+        face_results = face_mesh.process(img_rgb)
+        if face_results.multi_face_landmarks:
+            report.append("✅ Face detected")
+            self.face_time += 1
 
-    return detections
+            for landmarks in face_results.multi_face_landmarks:
+                mp_drawing.draw_landmarks(img, landmarks, mp_face_mesh.FACEMESH_CONTOURS)
 
-def generate_mock_questions():
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    data = {
-        "model": "llama3-8b-8192",
-        "messages": [
-            {"role": "user", "content": "Generate 5 multiple-choice general knowledge questions with 4 options each and indicate the correct option."}
-        ],
-        "temperature": 0.7
-    }
-    response = requests.post(url, headers=headers, json=data)
-    result = response.json()
+                # Eye open detection (landmark index for upper/lower eyelid)
+                left_eye_top = landmarks.landmark[386]
+                left_eye_bottom = landmarks.landmark[374]
+                eye_distance = abs(left_eye_top.y - left_eye_bottom.y)
+                if eye_distance < 0.01:
+                    report.append("⚠️ Left eye closed")
 
-    if "error" in result:
-        st.error(f"Groq API Error: {result['error']['message']}")
-        return []
+                # Mouth open detection
+                upper_lip = landmarks.landmark[13]
+                lower_lip = landmarks.landmark[14]
+                lip_distance = abs(upper_lip.y - lower_lip.y)
+                if lip_distance > 0.03:
+                    report.append("⚠️ Mouth open detected")
 
-    return result['choices'][0]['message']['content']
+        else:
+            report.append("❌ No face detected")
 
-def webcam_preview():
-    st.subheader("🎥 Camera Preview - Please allow camera access")
-    stframe = st.empty()
-    camera = cv2.VideoCapture(0)
-    preview_start = time.time()
-    access_granted = False
+        # Head pose estimation
+        pose_results = pose.process(img_rgb)
+        if pose_results.pose_landmarks:
+            nose_y = pose_results.pose_landmarks.landmark[mp_pose.PoseLandmark.NOSE].y
+            left_ear_y = pose_results.pose_landmarks.landmark[mp_pose.PoseLandmark.LEFT_EAR].y
+            if abs(nose_y - left_ear_y) > 0.05:
+                report.append("⚠️ Head tilted")
 
-    while time.time() - preview_start < 5:  # 5 seconds preview
-        ret, frame = camera.read()
-        if not ret:
-            continue
-        frame = cv2.flip(frame, 1)
-        stframe.image(frame, channels="BGR")
-        access_granted = True
+        # Phone detection (basic rectangle detection as placeholder)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        phones = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, 1.2, 100)
+        if phones is not None:
+            report.append("📱 Phone-like object detected")
 
-    camera.release()
-    return access_granted
+        # Draw report messages on frame
+        y_offset = 30
+        for r in report:
+            cv2.putText(img, r, (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            y_offset += 30
 
-def run_test():
-    global window_switch_count
-    st.title("🎓 Smart Proctored Mock Test")
+        # Append to log
+        timestamp = time.strftime("%H:%M:%S", time.localtime())
+        for r in report:
+            activity_log.append(f"[{timestamp}] {r}")
 
-    duration_option = st.selectbox("Select Test Duration", ["1 min", "3 min", "10 min", "20 min"])
-    duration_seconds = {"1 min":60, "3 min":180, "10 min":600, "20 min":1200}[duration_option]
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-    # Check camera preview
-    access_granted = webcam_preview()
-    if not access_granted:
-        st.error("⚠️ Could not access webcam. Please allow camera permission and refresh.")
-        return
+st.set_page_config(page_title="🖥️ Smart Proctored Mock Test")
 
-    st.success("✅ Camera access confirmed. You can start the test.")
+st.title("🎓 Smart Proctored Mock Test System")
+st.write("👉 This proctored test monitors your face, eyes, head, mouth & phone detection in real-time. Allow webcam access to start.")
 
-    if st.button("Start Test"):
-        mock_questions_text = generate_mock_questions()
-        if not mock_questions_text:
-            return
+duration = st.selectbox("Select test duration (minutes):", [1, 3, 10, 20])
+duration_seconds = duration * 60
 
-        st.subheader("📄 AI-Generated Mock Test")
-        questions = mock_questions_text.strip().split('\n\n')
-        user_answers = {}
+start_test = st.button("✅ Start Test")
 
-        for idx, q in enumerate(questions):
-            st.markdown(f"**Q{idx+1}:** {q.splitlines()[0]}")
-            options = [opt.strip() for opt in q.splitlines()[1:5]]
-            user_answers[idx] = st.radio(f"Select your answer for Q{idx+1}:", options, key=f"q{idx+1}")
+if start_test:
+    st.warning("⚠️ Please allow webcam access in browser popup to proceed.")
 
-        st.warning("⚠️ Don't switch windows during the test! Window switch will be counted.")
-        st.info("👉 Keep your face visible for monitoring.")
+    processor = webrtc_streamer(
+        key="exam-proctor",
+        video_processor_factory=VideoProcessor,
+        media_stream_constraints={"video": True, "audio": False},
+    )
 
-        stframe = st.empty()
-        camera = cv2.VideoCapture(0)
-        start_time = time.time()
+    start_time = time.time()
 
-        window_event_script = """
-            <script>
-            let count = 0;
-            window.onblur = () => { fetch('/?window_switch='+ (++count)); };
-            </script>
-        """
-        st.components.v1.html(window_event_script)
+    while time.time() - start_time < duration_seconds:
+        time.sleep(1)
 
-        while time.time() - start_time < duration_seconds:
-            ret, frame = camera.read()
-            if not ret:
-                continue
-            frame = cv2.flip(frame, 1)
+    st.success("🎉 Test completed!")
 
-            detections = detect_features(frame)
-            activity_log.extend(detections)
+    # Generate downloadable report
+    st.subheader("📊 Proctoring Report")
+    unique_logs = list(set(activity_log))
+    for log in unique_logs:
+        st.write(f"- {log}")
 
-            for idx, d in enumerate(detections):
-                cv2.putText(frame, d, (10, 30 + idx*30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
+    report_text = "\n".join(unique_logs)
+    st.download_button("📥 Download Report", report_text, file_name="Proctoring_Report.txt")
 
-            stframe.image(frame, channels="BGR")
-
-            query_params = st.experimental_get_query_params()
-            if "window_switch" in query_params:
-                window_switch_count = int(query_params["window_switch"][0])
-
-        camera.release()
-        st.success("✅ Test completed.")
-
-        st.subheader("📊 Proctoring Report")
-        face_time_percent = (face_present_count / total_frames) * 100 if total_frames else 0
-
-        report_lines = [
-            f"👤 Face visible {face_time_percent:.2f}% of the time",
-            f"🙃 Head movements detected: {head_movement_count}",
-            f"😮 Mouth open instances: {mouth_open_count}",
-            f"🖥️ Window switches detected: {window_switch_count}",
-            "",
-            "Activity Log:",
-            *list(set(activity_log)),
-            "",
-            "User Answers:"
-        ]
-        for q_idx, answer in user_answers.items():
-            report_lines.append(f"Q{q_idx+1}: {answer}")
-
-        for line in report_lines:
-            st.write("- " + line)
-
-        report_text = "\n".join(report_lines)
-        with open("proctoring_report.txt", "w") as f:
-            f.write(report_text)
-        with open("proctoring_report.txt", "rb") as f:
-            st.download_button("📥 Download Report", f, file_name="Proctoring_Report.txt")
-
-if __name__ == "__main__" or __name__ == "__streamlit__":
-    run_test()
