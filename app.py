@@ -1,75 +1,63 @@
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
 import av
+import mediapipe as mp
 import cv2
 import numpy as np
-import math
 
-# Load classifiers
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_eye.xml")
-mouth_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_mcs_mouth.xml")
+mp_face_detection = mp.solutions.face_detection
+mp_face_mesh = mp.solutions.face_mesh
 
-class ProctoringTransformer(VideoTransformerBase):
+class MediapipeTransformer(VideoTransformerBase):
+    def __init__(self):
+        self.face_detection = mp_face_detection.FaceDetection(min_detection_confidence=0.5)
+        self.face_mesh = mp_face_mesh.FaceMesh(refine_landmarks=True)
+    
     def transform(self, frame):
         img = frame.to_ndarray(format="bgr24")
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-        faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         
-        alert = ""
+        results = self.face_detection.process(img_rgb)
+        mesh_results = self.face_mesh.process(img_rgb)
         
-        for (x, y, w, h) in faces:
-            cv2.rectangle(img, (x,y), (x+w, y+h), (255,0,0), 2)
-            roi_gray = gray[y:y+h, x:x+w]
-            roi_color = img[y:y+h, x:x+w]
-            
-            eyes = eye_cascade.detectMultiScale(roi_gray)
-            mouths = mouth_cascade.detectMultiScale(roi_gray, 1.5, 11)
-            
-            # Eye detection
-            if len(eyes) >= 2:
-                eye_centers = []
-                for (ex, ey, ew, eh) in eyes[:2]:
-                    center = (ex + ew//2, ey + eh//2)
-                    eye_centers.append(center)
-                    cv2.rectangle(roi_color, (ex, ey), (ex+ew, ey+eh), (0,255,0), 2)
+        if results.detections:
+            for detection in results.detections:
+                bboxC = detection.location_data.relative_bounding_box
+                ih, iw, _ = img.shape
+                x,y,w,h = int(bboxC.xmin * iw), int(bboxC.ymin * ih), int(bboxC.width * iw), int(bboxC.height * ih)
+                cv2.rectangle(img, (x,y), (x+w,y+h), (0,255,0), 2)
+        
+        if mesh_results.multi_face_landmarks:
+            for face_landmarks in mesh_results.multi_face_landmarks:
+                # mouth open detection (landmark 13 = upper lip, 14 = lower lip)
+                top_lip = face_landmarks.landmark[13]
+                bottom_lip = face_landmarks.landmark[14]
                 
-                # Head pose estimation: simple angle
-                if len(eye_centers) == 2:
-                    dx = eye_centers[1][0] - eye_centers[0][0]
-                    dy = eye_centers[1][1] - eye_centers[0][1]
-                    angle = math.degrees(math.atan2(dy, dx))
-                    if abs(angle) > 20:
-                        alert = "Looking Away!"
-                        cv2.putText(img, alert, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
-            
-            # Mouth detection
-            for (mx, my, mw, mh) in mouths:
-                if my > h/2:  # lower half only
-                    cv2.rectangle(roi_color, (mx, my), (mx+mw, my+mh), (0,0,255), 2)
-                    alert = "Mouth Open!"
-                    cv2.putText(img, alert, (x, y+h+30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
-
-        if len(faces) == 0:
-            cv2.putText(img, "No face detected!", (30,30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
+                ih, iw, _ = img.shape
+                top = np.array([int(top_lip.x * iw), int(top_lip.y * ih)])
+                bottom = np.array([int(bottom_lip.x * iw), int(bottom_lip.y * ih)])
+                
+                distance = np.linalg.norm(top - bottom)
+                
+                cv2.circle(img, tuple(top), 2, (0,255,0), -1)
+                cv2.circle(img, tuple(bottom), 2, (0,0,255), -1)
+                cv2.line(img, tuple(top), tuple(bottom), (255,0,0), 2)
+                
+                if distance > 15:
+                    cv2.putText(img, "Mouth Open!", (30, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
         
         return img
 
-st.title("AI Proctoring System")
-st.write("Click below to start webcam monitoring.")
+st.title("AI Proctoring with Mediapipe")
+st.write("Click start to begin webcam monitoring.")
 
 rtc_config = {
-    "iceServers": [
-        {"urls": "stun:stun.l.google.com:19302"},
-        {"urls": "turn:openrelay.metered.ca:80", "username": "openrelayproject", "credential": "openrelayproject"},
-        {"urls": "turn:openrelay.metered.ca:443", "username": "openrelayproject", "credential": "openrelayproject"}
-    ]
+    "iceServers": [{"urls": "stun:stun.l.google.com:19302"}]
 }
 
 webrtc_streamer(
-    key="proctoring",
-    video_transformer_factory=ProctoringTransformer,
+    key="proctor",
+    video_transformer_factory=MediapipeTransformer,
     rtc_configuration=rtc_config,
     media_stream_constraints={"video": True, "audio": False}
 )
