@@ -1,62 +1,34 @@
+
 import streamlit as st
-import requests
+import cv2
+import numpy as np
+import time
 import base64
 import os
-import time
-from datetime import datetime
-from dotenv import load_dotenv
-from streamlit.components.v1 import html
-from camera_input_live import camera_input_live
+import requests
+from PIL import Image
+from io import BytesIO
 
-# Load environment variables
-load_dotenv()
-GOOGLE_VISION_API_KEY = os.getenv("GOOGLE_VISION_API_KEY")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+# Load GROQ API key
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
-# Check for API keys
-if not GOOGLE_VISION_API_KEY or not GROQ_API_KEY:
-    st.error("Missing API keys. Please set GOOGLE_VISION_API_KEY and GROQ_API_KEY in the .env file.")
-    st.stop()
+# Title
+st.set_page_config(page_title="AI Proctoring + Quiz", layout="centered")
+st.title("🎓 Smart AI Proctored Quiz")
 
-# Set page configuration
-st.set_page_config(page_title="🎓 Proctored Quiz", page_icon="📝")
-
-# Initialize session state
+# Session state init
 if "quiz_started" not in st.session_state:
     st.session_state.quiz_started = False
+if "questions" not in st.session_state:
     st.session_state.questions = []
-    st.session_state.answers = {}
-    st.session_state.proctoring_logs = []
-    st.session_state.tab_switches = 0
+if "answers" not in st.session_state:
+    st.session_state.answers = []
+if "start_time" not in st.session_state:
     st.session_state.start_time = None
+if "proctoring_logs" not in st.session_state:
+    st.session_state.proctoring_logs = []
 
-# JavaScript for tab switch detection
-tab_switch_js = """
-<script>
-let hidden, visibilityChange; 
-if (typeof document.hidden !== "undefined") {
-  hidden = "hidden";
-  visibilityChange = "visibilitychange";
-} else if (typeof document.msHidden !== "undefined") {
-  hidden = "msHidden";
-  visibilityChange = "msvisibilitychange";
-} else if (typeof document.webkitHidden !== "undefined") {
-  hidden = "webkitHidden";
-  visibilityChange = "webkitvisibilitychange";
-}
-
-document.addEventListener(visibilityChange, function() {
-  if (document[hidden]) {
-    fetch("/tab_switch");
-  }
-}, false);
-</script>
-"""
-
-# Display JavaScript
-html(tab_switch_js)
-
-# Function to generate quiz questions using GROQ API
+# Utility: Quiz generation
 def generate_quiz():
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
@@ -65,13 +37,18 @@ def generate_quiz():
     data = {
         "model": "mixtral-8x7b-32768",
         "messages": [
-            {"role": "system", "content": "Generate a 5-question multiple-choice quiz on general knowledge. Each question should have 4 options labeled A-D, and provide the correct answer."}
+            {"role": "system", "content": "Generate a 5-question multiple-choice quiz on general knowledge. Each question should have 4 options labeled A-D, and provide the correct answer as 'Answer: A/B/C/D'."}
         ]
     }
     response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=data)
-    if response.status_code == 200:
+
+    if response.status_code != 200:
+        st.error(f"Quiz generation failed. Status code: {response.status_code}")
+        st.text(response.text)
+        return []
+
+    try:
         content = response.json()["choices"][0]["message"]["content"]
-        # Parse the content into questions and options
         questions = []
         for q in content.strip().split("\n\n"):
             lines = q.strip().split("\n")
@@ -86,126 +63,88 @@ def generate_quiz():
                     "answer": correct_answer
                 })
         return questions
-    else:
-        st.error("Failed to generate quiz questions.")
+    except Exception as e:
+        st.error(f"Parsing quiz content failed: {e}")
         return []
 
-# Function to analyze image using Google Vision API
-def analyze_image(image_bytes):
-    image_b64 = base64.b64encode(image_bytes).decode('utf-8')
-    vision_url = f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_VISION_API_KEY}"
-    vision_payload = {
-        "requests": [{
-            "image": {"content": image_b64},
-            "features": [
-                {"type": "FACE_DETECTION"},
-                {"type": "OBJECT_LOCALIZATION"}
-            ]
-        }]
-    }
-    resp = requests.post(vision_url, json=vision_payload)
-    if resp.status_code == 200:
-        return resp.json()
-    else:
-        return {}
+# Utility: Detect faces
+def detect_face(image):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
+    return len(faces), faces
 
-# Function to process proctoring data
-def process_proctoring_data(result):
-    log = {}
-    faces = result.get('responses', [{}])[0].get('faceAnnotations', [])
-    objects = result.get('responses', [{}])[0].get('localizedObjectAnnotations', [])
-    object_names = [obj['name'].lower() for obj in objects]
-
-    log['timestamp'] = datetime.now().isoformat()
-    log['num_faces'] = len(faces)
-    log['multiple_faces'] = len(faces) > 1
-    log['phone_detected'] = any(name in object_names for name in ['cell phone', 'mobile phone', 'telephone'])
-    log['extra_persons'] = object_names.count('person') - 1
-
-    if faces:
-        face = faces[0]
-        log['head_pose'] = {
-            'roll': face.get('rollAngle', 0),
-            'pan': face.get('panAngle', 0),
-            'tilt': face.get('tiltAngle', 0)
+# Step 1: Camera snapshot
+if st.session_state.quiz_started:
+    st.subheader("👁️ Proctoring in Progress: Stay Focused")
+    uploaded_image = st.camera_input("📸 Snapshot (Required)")
+    if uploaded_image:
+        image = Image.open(uploaded_image)
+        img_array = np.array(image)
+        face_count, faces = detect_face(img_array)
+        log = {
+            "timestamp": time.time(),
+            "face_count": face_count,
         }
-        log['eyes_open'] = {
-            'left': face.get('leftEyeOpenLikelihood', 'UNKNOWN'),
-            'right': face.get('rightEyeOpenLikelihood', 'UNKNOWN')
-        }
-        log['mouth_open'] = face.get('mouthOpenLikelihood', 'UNKNOWN')
-    else:
-        log['head_pose'] = {}
-        log['eyes_open'] = {}
-        log['mouth_open'] = 'UNKNOWN'
-
-    return log
-
-# Start quiz
-if not st.session_state.quiz_started:
-    st.title("🎓 Proctored Quiz Application")
-    if st.button("Start Quiz"):
-        st.session_state.questions = generate_quiz()
-        st.session_state.quiz_started = True
-        st.session_state.start_time = time.time()
-        st.experimental_rerun()
-else:
-    st.title("📝 Quiz in Progress")
-    st.write("Please answer the following questions:")
-
-    # Display questions
-    for idx, q in enumerate(st.session_state.questions):
-        st.write(f"**{q['question']}**")
-        for option in q['options']:
-            st.radio(f"Question {idx+1}", q['options'], key=f"q{idx}")
-
-    # Live camera input
-    image = camera_input_live()
-    if image:
-        image_bytes = image.getvalue()
-        result = analyze_image(image_bytes)
-        log = process_proctoring_data(result)
+        if face_count == 0:
+            st.warning("⚠️ No face detected!")
+        elif face_count > 1:
+            st.warning("⚠️ Multiple faces detected!")
         st.session_state.proctoring_logs.append(log)
 
-    # Submit button
-    if st.button("Submit Quiz"):
+# Step 2: Quiz UI
+if st.session_state.quiz_started and st.session_state.questions:
+    st.subheader("📝 Quiz Time!")
+    for i, q in enumerate(st.session_state.questions):
+        st.write(f"**Q{i+1}. {q['question']}**")
+        for opt in q["options"]:
+            st.radio("", options=q["options"], key=f"q_{i}")
+
+    if st.button("🧾 Submit Quiz"):
         st.session_state.quiz_started = False
         st.session_state.end_time = time.time()
-        st.experimental_rerun()
 
-# Display report after submission
-if not st.session_state.quiz_started and st.session_state.questions:
-    st.title("📊 Quiz Report")
+        # Evaluate answers
+        score = 0
+        results = []
+        for i, q in enumerate(st.session_state.questions):
+            selected = st.session_state.get(f"q_{i}")
+            correct = q["answer"]
+            is_correct = selected.startswith(correct)
+            results.append((q["question"], selected, correct, is_correct))
+            if is_correct:
+                score += 1
 
-    # Calculate score
-    score = 0
-    for idx, q in enumerate(st.session_state.questions):
-        user_answer = st.session_state.get(f"q{idx}", "")
-        correct_answer = q['answer']
-        if user_answer and user_answer.startswith(correct_answer):
-            score += 1
-    st.write(f"**Your Score: {score} out of {len(st.session_state.questions)}**")
+        duration = round(st.session_state.end_time - st.session_state.start_time, 2)
+        st.success(f"✅ Quiz Completed! Score: {score}/5 | Time: {duration}s")
 
-    # Proctoring summary
-    st.subheader("Proctoring Summary")
-    total_logs = len(st.session_state.proctoring_logs)
-    multiple_faces = sum(1 for log in st.session_state.proctoring_logs if log['multiple_faces'])
-    phones_detected = sum(1 for log in st.session_state.proctoring_logs if log['phone_detected'])
-    extra_persons = sum(log['extra_persons'] for log in st.session_state.proctoring_logs)
+        st.subheader("📋 Result Summary:")
+        for q_text, sel, ans, correct in results:
+            st.write(f"- **{q_text}**")
+            st.write(f"  - Your Answer: {sel}")
+            st.write(f"  - Correct Answer: {ans}")
+            st.write(f"  - {'✅ Correct' if correct else '❌ Incorrect'}")
 
-    st.write(f"Total Monitoring Instances: {total_logs}")
-    st.write(f"Instances with Multiple Faces: {multiple_faces}")
-    st.write(f"Instances with Phone Detected: {phones_detected}")
-    st.write(f"Total Extra Persons Detected: {extra_persons}")
-    st.write(f"Tab Switches Detected: {st.session_state.tab_switches}")
+        st.subheader("🔒 Proctoring Report:")
+        total_logs = len(st.session_state.proctoring_logs)
+        no_face = sum(1 for log in st.session_state.proctoring_logs if log["face_count"] == 0)
+        multi_face = sum(1 for log in st.session_state.proctoring_logs if log["face_count"] > 1)
+        st.write(f"- Snapshots analyzed: {total_logs}")
+        st.write(f"- No face detected: {no_face}")
+        st.write(f"- Multiple faces detected: {multi_face}")
 
-    # Download report
-    report = f"""
-    Quiz Score: {score}/{len(st.session_state.questions)}
-    Total Monitoring Instances: {total_logs}
-    Instances with Multiple Faces: {multiple_faces}
-    Instances with Phone Detected: {phones_detected}
-    Total Extra Persons Detected: {extra_persons}
-    Tab Switches Detected: {st.session_state.tab_switches}
-    """
-    st.download_button("Download Report", report, file_name="proctoring_report.txt")
+        st.session_state.questions = []
+        st.session_state.proctoring_logs = []
+
+# Step 3: Start Quiz
+if not st.session_state.quiz_started:
+    st.subheader("🚀 Launch Quiz")
+    if st.button("Start Quiz"):
+        questions = generate_quiz()
+        if questions:
+            st.session_state.questions = questions
+            st.session_state.quiz_started = True
+            st.session_state.start_time = time.time()
+            st.experimental_rerun()
+        else:
+            st.error("Quiz could not be generated. Please check your API key or try again later.")
