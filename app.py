@@ -24,7 +24,7 @@ document.addEventListener("visibilitychange", () => {
 </script>
 """
 
-# State initialization
+# Initialize states
 if 'quiz_started' not in st.session_state:
     st.session_state.quiz_started = False
 if 'submitted' not in st.session_state:
@@ -35,14 +35,13 @@ if 'answers' not in st.session_state:
     st.session_state.answers = {}
 if 'tab_switches' not in st.session_state:
     st.session_state.tab_switches = 0
+if 'monitor_permission' not in st.session_state:
+    st.session_state.monitor_permission = False
 
-# Inject JS (this runs on every rerun)
+# Inject JS
 st.components.v1.html(tab_switch_script + "<div id='switch-count' style='display:none;'>0</div>", height=0)
 
-# JavaScript message listener to increment tab switch
-tab_switch_placeholder = st.empty()
-tab_switch_placeholder.markdown("🔁 **Tab Switches: 0**")
-
+# JavaScript message listener to capture tab switches
 def set_tab_switch_count_js():
     st.components.v1.html("""
     <script>
@@ -51,6 +50,7 @@ def set_tab_switch_count_js():
             const count = event.data.count;
             const el = window.parent.document.querySelector('section.main div.block-container div:nth-child(1)');
             if (el) el.innerHTML = "🔁 <b>Tab Switches:</b> " + count;
+            window.parent.postMessage({ type: 'SAVE_TAB_SWITCH', count: count }, "*");
         }
     });
     </script>
@@ -58,7 +58,13 @@ def set_tab_switch_count_js():
 
 set_tab_switch_count_js()
 
-# MCQ generator from Groq
+# Capture tab switches (listen for postMessage and store in session_state)
+tab_switch_placeholder = st.empty()
+tab_switch_placeholder.markdown(f"🔁 **Tab Switches: {st.session_state.tab_switches}**")
+
+# JS bridge simulation for updating session_state
+st.experimental_data_editor({"tab_switches": st.session_state.tab_switches}, disabled=True)
+
 def generate_mcqs(topic, num_questions):
     prompt = f"""
     Generate {num_questions} multiple choice questions on {topic}.
@@ -94,36 +100,39 @@ if not st.session_state.quiz_started:
         topic = st.text_input("📘 Topic", value="Python")
         num_qs = st.slider("❓ Number of Questions", 1, 10, 3)
         duration = st.slider("⏱️ Duration (minutes)", 1, 30, 5)
-        allow = st.checkbox("✅ I allow tab monitoring for proctoring.")
-        start = st.form_submit_button("🚀 Start Quiz")
+        allow = st.checkbox("✅ I allow tab monitoring for proctoring (Required)")
 
+        start = st.form_submit_button("🚀 Start Quiz")
         if start:
             if not allow:
-                st.error("Permission required to proceed.")
+                st.error("❌ Permission is required to start the quiz. Please check the box.")
             else:
+                st.session_state.monitor_permission = True
                 st.session_state.questions = generate_mcqs(topic, num_qs)
                 st.session_state.quiz_started = True
                 st.session_state.submitted = False
                 st.session_state.answers = {}
                 st.session_state.tab_switches = 0
 
-# Show questions
+# Quiz in progress
 if st.session_state.quiz_started and not st.session_state.submitted:
     st.header("📝 Quiz In Progress")
-    st.markdown("⚠️ Tab switching will be monitored and recorded.")
-    answers = {}
+    if st.session_state.monitor_permission:
+        st.markdown("⚠️ Tab switching is monitored. Please stay on this tab!")
+    else:
+        st.error("Monitoring permission was not granted. Quiz may be invalid.")
 
+    answers = {}
     with st.form("mcq_form"):
         for idx, q in enumerate(st.session_state.questions):
             st.write(f"**Q{idx+1}:** {q['question']}")
             answers[idx] = st.radio("Options", q["options"], key=f"q_{idx}")
         submit = st.form_submit_button("✅ Submit")
-
         if submit:
             st.session_state.answers = answers
             st.session_state.submitted = True
 
-# Show results
+# Results
 if st.session_state.submitted:
     st.header("📊 Quiz Results")
     correct = 0
@@ -138,4 +147,17 @@ if st.session_state.submitted:
         st.markdown("---")
 
     st.success(f"🎯 Final Score: {correct}/{len(st.session_state.questions)}")
-    st.warning("📉 Tab switches may affect evaluation credibility.")
+    
+    # Retrieve tab switches from DOM
+    switch_count_str = st.experimental_get_query_params().get('tab_switches', ['0'])[0]
+    try:
+        recorded_switches = int(switch_count_str)
+    except:
+        recorded_switches = st.session_state.tab_switches
+    
+    st.warning(f"📉 You switched tabs **{recorded_switches} times** during the quiz.")
+    if recorded_switches > 2:
+        st.error("⚠️ High tab switching detected. Exam may be flagged for review.")
+    else:
+        st.success("✅ Acceptable tab switching behavior.")
+
