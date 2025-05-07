@@ -15,7 +15,7 @@ if not GOOGLE_VISION_API_KEY:
     st.stop()
 
 st.set_page_config(page_title="🎓 Proctoring System", page_icon="🎥")
-st.title("🎓 Online Proctoring System with Google Vision API")
+st.title("🎓 Online Proctoring System ")
 
 # Use a button to start live detection or set a timer
 if st.button("Start Live Detection"):
