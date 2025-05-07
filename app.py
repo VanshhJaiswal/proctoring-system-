@@ -5,25 +5,26 @@ import os
 import groq
 import json
 
-# Load API keys from environment variables
+# Load API keys
 GOOGLE_VISION_API_KEY = os.getenv("GOOGLE_VISION_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # Initialize Groq client
 groq_client = groq.Client(api_key=GROQ_API_KEY)
 
-st.title("🎥 AI-Based Proctoring System (Google Vision API + Groq)")
+st.title("🎥 AI-Based Proctoring System (Live Webcam)")
 
-uploaded_file = st.file_uploader("📸 Upload an image for proctoring analysis", type=["jpg", "jpeg", "png"])
+# Use Streamlit webcam input
+captured_image = st.camera_input("📸 Capture live photo for proctoring analysis")
 
-if uploaded_file is not None:
-    st.image(uploaded_file, caption="Uploaded Image", use_column_width=True)
+if captured_image is not None:
+    st.image(captured_image, caption="Captured Image", use_column_width=True)
 
     # Encode image to base64
-    image_content = uploaded_file.read()
+    image_content = captured_image.getvalue()
     encoded_image = base64.b64encode(image_content).decode('utf-8')
 
-    # Google Vision API URL
+    # Google Vision API endpoint
     vision_api_url = f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_VISION_API_KEY}"
 
     # Prepare request payload
@@ -36,7 +37,7 @@ if uploaded_file is not None:
         ]
     }
 
-    with st.spinner("🔍 Analyzing image with Google Vision API..."):
+    with st.spinner("🔍 Analyzing captured image with Google Vision API..."):
         response = requests.post(vision_api_url, json=request_payload)
         result = response.json()
 
@@ -76,7 +77,7 @@ if uploaded_file is not None:
         st.write(f"**Emotions Detected:** {', '.join(emotions) if emotions else 'None'}")
 
         # Prepare prompt for Groq
-        prompt_text = f"""A proctoring system analyzed an exam session image.
+        prompt_text = f"""A proctoring system analyzed a live exam session image.
 Faces detected: {num_faces}.
 Emotions detected: {emotions if emotions else 'None'}.
 Alerts: {alerts}.
@@ -94,4 +95,5 @@ Write a professional proctoring report highlighting any suspicious or normal beh
 
     except Exception as e:
         st.error(f"❌ Error processing response: {e}")
-        st.json(result)  # show raw response for debugging
+        st.json(result)  # for debugging
+
