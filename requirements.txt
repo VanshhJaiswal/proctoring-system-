@@ -1,0 +1,8 @@
+streamlit
+opencv-python
+mediapipe
+transformers
+torch
+pandas
+python-dotenv
+requests
