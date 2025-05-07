@@ -2,16 +2,14 @@ import streamlit as st
 import openai
 import os
 import json
-import random
-import time
 
-# Load environment variable
+# Load API key
 openai.api_key = os.getenv("GROQ_API_KEY")
 MODEL_NAME = "mixtral-8x7b-32768"
 
 st.set_page_config(page_title="AI Proctored Quiz", layout="wide")
 
-# JS for tab switch detection
+# JavaScript to track tab switching
 tab_switch_js = """
 <script>
 let tabSwitchCount = 0;
@@ -32,12 +30,19 @@ def inject_tab_switch_js():
     st.markdown(tab_switch_js, unsafe_allow_html=True)
     st.markdown("🔁 Tab Switches: **`<span id='tab-switches'>0</span>`**", unsafe_allow_html=True)
 
-# Generate MCQs using Groq API
+# Function to get MCQs from Groq API
 def generate_mcqs(topic, num_questions):
     prompt = f"""
     Generate {num_questions} multiple choice questions on {topic}.
-    Respond in JSON list format: 
-    [{{"question": "...", "options": ["A", "B", "C", "D"], "answer": "B"}}, ...]
+    Format: JSON list like this:
+    [
+        {{
+            "question": "What is Python?",
+            "options": ["Language", "Snake", "Tool", "IDE"],
+            "answer": "Language"
+        }},
+        ...
+    ]
     """
     try:
         response = openai.ChatCompletion.create(
@@ -45,12 +50,13 @@ def generate_mcqs(topic, num_questions):
             messages=[{"role": "user", "content": prompt}]
         )
         content = response['choices'][0]['message']['content']
-        return json.loads(content)
+        mcqs = json.loads(content)
+        return mcqs
     except Exception as e:
-        st.error("❌ Failed to generate questions.")
-        return []
+        st.error("❌ Failed to generate questions. Check API key or formatting.")
+        st.stop()
 
-# Session state setup
+# Initialize session state
 if 'quiz_started' not in st.session_state:
     st.session_state.quiz_started = False
 if 'submitted' not in st.session_state:
@@ -74,12 +80,12 @@ if not st.session_state.quiz_started:
 
         if start:
             if not agree:
-                st.error("You must allow tab monitoring to start the quiz.")
+                st.error("You must allow tab monitoring to proceed.")
             else:
                 st.session_state.questions = generate_mcqs(topic, num_qs)
                 st.session_state.quiz_started = True
                 st.session_state.tab_switches = 0
-                st.experimental_set_query_params(tab_switches=0)
+                st.query_params["tab_switches"] = "0"
 
 # Active Quiz
 if st.session_state.quiz_started and not st.session_state.submitted:
@@ -95,7 +101,7 @@ if st.session_state.quiz_started and not st.session_state.submitted:
             st.session_state.answers = answers
             st.session_state.submitted = True
 
-# Evaluation
+# Result and Tab Switch Report
 if st.session_state.submitted:
     st.title("📊 Quiz Results")
     score = 0
@@ -110,4 +116,4 @@ if st.session_state.submitted:
             score += 1
 
     st.success(f"🎯 Your Score: {score}/{len(st.session_state.questions)}")
-    st.warning("⚠️ Tab switch detection is shown above. Excessive switches may flag dishonesty.")
+    st.warning("⚠️ Tab switch detection is shown above. Excessive tab switches may affect credibility.")
