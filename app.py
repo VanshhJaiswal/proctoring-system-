@@ -1,21 +1,29 @@
-import streamlit as st
-import cv2
-import numpy as np
+def detect_blinks(landmarks, face_oval):
+    """Detect eye blinks using facial landmarks"""
+    # Return false if CV is not available or landmarks are missing
+    if not CV_AVAILABLE or not landmarks:
+        return False
+        
+    try:
+        # Get landmarks for left and right eyes
+        # LEFT_EYE landmarks indices
+        left_eye = [landmarks[33], landmarks[160], landmarks[158], landmarks[133], landmarks[153], landmarks[144]]
+        
+        # RIGHT_EYE landmarks indices
+        right_eye = [landmarks[362], landmarks[385], landmarks[387], landmarks[263import streamlit as st
 import time
 import datetime
 import os
 import json
 import requests
-from PIL import Image
-from io import BytesIO
 import base64
-import platform
 import pandas as pd
 from dotenv import load_dotenv
 import threading
-import mediapipe as mp
-import streamlit_javascript as st_js
 import sys
+import numpy as np
+from PIL import Image
+from io import BytesIO
 
 # Set page configuration
 st.set_page_config(
@@ -28,12 +36,35 @@ st.set_page_config(
 # Load environment variables
 load_dotenv()
 
-# Initialize MediaPipe face detection and face mesh
-mp_face_detection = mp.solutions.face_detection
-mp_face_mesh = mp.solutions.face_mesh
-mp_drawing = mp.solutions.drawing_utils
-face_detection = mp_face_detection.FaceDetection(min_detection_confidence=0.5)
-face_mesh = mp_face_mesh.FaceMesh(min_detection_confidence=0.5, min_tracking_confidence=0.5)
+# Initialize global variables for proctoring
+face_detection = None
+face_mesh = None
+mp_drawing = None
+
+# Try to import OpenCV and MediaPipe, but don't fail if they're not available
+try:
+    import cv2
+    import mediapipe as mp
+    
+    # Initialize MediaPipe face detection and face mesh
+    mp_face_detection = mp.solutions.face_detection
+    mp_face_mesh = mp.solutions.face_mesh
+    mp_drawing = mp.solutions.drawing_utils
+    face_detection = mp_face_detection.FaceDetection(min_detection_confidence=0.5)
+    face_mesh = mp_face_mesh.FaceMesh(min_detection_confidence=0.5, min_tracking_confidence=0.5)
+    
+    CV_AVAILABLE = True
+except ImportError:
+    CV_AVAILABLE = False
+    st.sidebar.warning("OpenCV or MediaPipe couldn't be imported. Camera-based proctoring features will be limited.")
+
+# Try to import streamlit_javascript, but don't fail if it's not available
+try:
+    import streamlit_javascript as st_js
+    JS_AVAILABLE = True
+except ImportError:
+    JS_AVAILABLE = False
+    st.sidebar.warning("streamlit-javascript couldn't be imported. Tab switching detection will be disabled.")
 
 # Initialize Groq client - Check if API key is available
 groq_api_key = os.getenv("GROQ_API_KEY")
@@ -47,7 +78,9 @@ try:
         groq_client = Groq(api_key=groq_api_key)
     else:
         st.sidebar.error("GROQ_API_KEY not found. Please add it to your .env file or Streamlit secrets.")
+    GROQ_AVAILABLE = True
 except ImportError:
+    GROQ_AVAILABLE = False
     st.sidebar.error("The groq package is not installed. Please make sure it's in your requirements.txt file.")
 
 # Session state initialization
@@ -286,18 +319,18 @@ def detect_blinks(landmarks, face_oval):
 
 def process_webcam_feed():
     """Process webcam feed to detect faces and eye blinks"""
-    if not st.session_state.monitoring_active:
+    if not st.session_state.monitoring_active or not CV_AVAILABLE:
         return
-    
-    # Get webcam feed
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        st.error("Could not open webcam. Please check your camera connection.")
-        return
-    
-    stframe = st.empty()
     
     try:
+        # Get webcam feed
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            st.error("Could not open webcam. Please check your camera connection.")
+            return
+        
+        stframe = st.empty()
+        
         while st.session_state.monitoring_active:
             ret, frame = cap.read()
             if not ret:
@@ -383,44 +416,49 @@ def process_webcam_feed():
             
             time.sleep(0.1)  # Small delay to reduce CPU usage
     
+    except Exception as e:
+        st.error(f"Error in webcam processing: {str(e)}")
     finally:
-        cap.release()
+        if 'cap' in locals() and cap is not None:
+            cap.release()
 
 def detect_tab_switch():
     """Detect tab switching using JavaScript"""
-    if st.session_state.monitoring_active:
-        try:
-            # This will inject JavaScript to detect tab/window visibility changes
-            js_code = """
-            var hidden, visibilityChange;
-            if (typeof document.hidden !== "undefined") {
-                hidden = "hidden";
-                visibilityChange = "visibilitychange";
-            } else if (typeof document.msHidden !== "undefined") {
-                hidden = "msHidden";
-                visibilityChange = "msvisibilitychange";
-            } else if (typeof document.webkitHidden !== "undefined") {
-                hidden = "webkitHidden";
-                visibilityChange = "webkitvisibilitychange";
-            }
-            
-            var isHidden = function() {
-                return document[hidden];
-            };
-            
-            isHidden();
-            """
-            
-            is_hidden = st_js.st_javascript(js_code)
-            
-            if is_hidden and not st.session_state.tab_switch_detected:
-                st.session_state.tab_switch_detected = True
-                st.session_state.proctoring_data['tab_switches'] += 1
-            elif not is_hidden:
-                st.session_state.tab_switch_detected = False
-        except:
-            # If JavaScript detection fails, we'll continue without it
-            pass
+    if not st.session_state.monitoring_active or not JS_AVAILABLE:
+        return
+        
+    try:
+        # This will inject JavaScript to detect tab/window visibility changes
+        js_code = """
+        var hidden, visibilityChange;
+        if (typeof document.hidden !== "undefined") {
+            hidden = "hidden";
+            visibilityChange = "visibilitychange";
+        } else if (typeof document.msHidden !== "undefined") {
+            hidden = "msHidden";
+            visibilityChange = "msvisibilitychange";
+        } else if (typeof document.webkitHidden !== "undefined") {
+            hidden = "webkitHidden";
+            visibilityChange = "webkitvisibilitychange";
+        }
+        
+        var isHidden = function() {
+            return document[hidden];
+        };
+        
+        isHidden();
+        """
+        
+        is_hidden = st_js.st_javascript(js_code)
+        
+        if is_hidden and not st.session_state.tab_switch_detected:
+            st.session_state.tab_switch_detected = True
+            st.session_state.proctoring_data['tab_switches'] += 1
+        elif not is_hidden:
+            st.session_state.tab_switch_detected = False
+    except Exception as e:
+        # If JavaScript detection fails, we'll continue without it
+        pass
 
 def generate_report():
     """Generate a comprehensive proctoring report"""
