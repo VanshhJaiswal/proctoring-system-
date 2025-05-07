@@ -1,5 +1,5 @@
 streamlit
-requests
-python-dotenv
 opencv-python-headless
-numpy
+google-cloud-vision==3.11.1
+python-dotenv
+pandas
