@@ -1,15 +1,14 @@
 import streamlit as st
-import openai
+import groq
 import os
 import json
 
-# Initialize OpenAI client (for openai>=1.0.0)
-client = openai.OpenAI(api_key=os.getenv("GROQ_API_KEY"))
+# Initialize Groq client
+client = groq.Groq(api_key=os.getenv("GROQ_API_KEY"))
 MODEL_NAME = "mixtral-8x7b-32768"
 
 st.set_page_config(page_title="AI Proctored Quiz", layout="wide")
 
-# Inject JS to track tab switches
 tab_switch_script = """
 <script>
 let tabSwitches = 0;
@@ -24,7 +23,6 @@ document.addEventListener("visibilitychange", () => {
 </script>
 """
 
-# Initialize session state
 if 'quiz_started' not in st.session_state:
     st.session_state.quiz_started = False
 if 'submitted' not in st.session_state:
@@ -38,7 +36,6 @@ if 'tab_switches' not in st.session_state:
 if 'monitor_permission' not in st.session_state:
     st.session_state.monitor_permission = False
 
-# Inject JS + hidden counter
 st.components.v1.html(
     tab_switch_script + """
     <div id='switch-count' style='display:none;'>0</div>
@@ -46,7 +43,6 @@ st.components.v1.html(
     height=0
 )
 
-# Helper: read tab count from frontend (JS → DOM → Streamlit)
 def read_tab_switch_count():
     count_html = st.components.v1.html("""
     <script>
@@ -60,18 +56,15 @@ def read_tab_switch_count():
         count = st.session_state.tab_switches
     return count
 
-# Update tab switch count every refresh
 st.session_state.tab_switches = read_tab_switch_count()
 
 tab_switch_placeholder = st.empty()
 tab_switch_placeholder.markdown(f"🔁 **Tab Switches: {st.session_state.tab_switches}**")
 
-# Generate MCQs
 def generate_mcqs(topic, num_questions):
     prompt = f"""
     Generate {num_questions} unique multiple choice questions on {topic}.
-    Ensure each question is different.
-    Format STRICTLY as a JSON array like:
+    Strictly output JSON array like:
     [
         {{
             "question": "What is Python?",
@@ -108,7 +101,6 @@ def sample_questions(n):
         for i in range(n)
     ]
 
-# Quiz setup
 if not st.session_state.quiz_started:
     st.title("🧠 AI Proctored Quiz")
     with st.form("quiz_form"):
@@ -128,9 +120,8 @@ if not st.session_state.quiz_started:
                 st.session_state.submitted = False
                 st.session_state.answers = {}
                 st.session_state.tab_switches = 0
-                st.experimental_rerun()  # refresh after start
+                st.experimental_rerun()
 
-# Quiz in progress
 if st.session_state.quiz_started and not st.session_state.submitted:
     st.header("📝 Quiz In Progress")
     if st.session_state.monitor_permission:
@@ -147,9 +138,8 @@ if st.session_state.quiz_started and not st.session_state.submitted:
         if submit:
             st.session_state.answers = answers
             st.session_state.submitted = True
-            st.experimental_rerun()  # refresh to results
+            st.experimental_rerun()
 
-# Results
 if st.session_state.submitted:
     st.header("📊 Quiz Results")
     correct = 0
