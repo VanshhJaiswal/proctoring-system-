@@ -1,182 +1,82 @@
-import streamlit as st
-import cv2
-import tempfile
 import os
-import time
-import json
-import random
-import csv
+import io
+import pandas as pd
 import numpy as np
-from datetime import datetime
-from groq import Groq
-from ultralytics import YOLO
-import dlib
+import streamlit as st
+from google.cloud import vision
+from google.cloud.vision import types
+from google.oauth2 import service_account
+from PIL import Image
 
-# Load models
-face_detector = dlib.get_frontal_face_detector()
-predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
-model = YOLO("yolov8n.pt")  # For mobile detection
+# Load credentials for Google Cloud Vision API
+credentials = service_account.Credentials.from_service_account_file('path_to_your_google_cloud_service_account_key.json')
+client = vision.ImageAnnotatorClient(credentials=credentials)
 
-# Load environment variables
-from dotenv import load_dotenv
-load_dotenv()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-MODEL_NAME = "meta-llama/llama-4-scout-17b-16e-instruct"
+# Helper function for processing images using Google Vision API
+def detect_faces(image_path):
+    """Detect faces in an image using Google Vision API"""
+    with io.open(image_path, 'rb') as image_file:
+        content = image_file.read()
 
-# Initialize Groq client
-client = Groq(api_key=GROQ_API_KEY)
+    image = vision.Image(content=content)
+    response = client.face_detection(image=image)
+    faces = response.face_annotations
 
-st.set_page_config(page_title="AI Proctoring System", layout="wide")
-st.title("🧠 AI Proctoring System with Random Test and Alerts")
+    return faces
 
-# Session state init
-if "start_time" not in st.session_state:
-    st.session_state.start_time = None
-if "logs" not in st.session_state:
-    st.session_state.logs = []
-if "questions" not in st.session_state:
-    st.session_state.questions = []
-if "current_q" not in st.session_state:
-    st.session_state.current_q = 0
-if "score" not in st.session_state:
-    st.session_state.score = 0
+def detect_labels(image_path):
+    """Detect labels (e.g., mobile phones) in an image"""
+    with io.open(image_path, 'rb') as image_file:
+        content = image_file.read()
 
-# Fallback questions
-def sample_questions(n):
-    return [{
-        "question": f"Sample Question {i+1}?",
-        "options": ["A", "B", "C", "D"],
-        "answer": "A"
-    } for i in range(n)]
+    image = vision.Image(content=content)
+    response = client.label_detection(image=image)
+    labels = response.label_annotations
 
-# Groq question generator
-def generate_mcqs(topic, num_questions):
-    prompt = f"""
-    Generate {num_questions} unique multiple choice questions on {topic}.
-    Strictly output JSON array like:
-    [
-        {{
-            "question": "What is Python?",
-            "options": ["Language", "Snake", "Tool", "IDE"],
-            "answer": "Language"
-        }},
-        ...
-    ]
-    Only output valid JSON array. No explanation.
-    """
-    try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        content = response.choices[0].message.content.strip()
+    detected_labels = [label.description for label in labels]
+    return detected_labels
 
-        if not content.startswith("["):
-            raise ValueError("Groq API did not return a JSON array.")
+# Streamlit app layout
+st.title("AI Proctoring System")
 
-        data = json.loads(content)
-        if isinstance(data, list) and len(data) == num_questions:
-            return data
-        else:
-            st.warning(f"⚠️ Groq returned {len(data)} questions. Falling back to sample.")
-            return sample_questions(num_questions)
-    except Exception as e:
-        st.error(f"❌ Could not fetch questions: {str(e)}. Using fallback.")
-        return sample_questions(num_questions)
+# Upload image for proctoring analysis
+uploaded_image = st.file_uploader("Upload an Image", type=["jpg", "jpeg", "png"])
 
-# Face absent detection
-def detect_absent(frame):
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    faces = face_detector(gray)
-    return len(faces) == 0
+if uploaded_image is not None:
+    # Show the uploaded image
+    image = Image.open(uploaded_image)
+    st.image(image, caption="Uploaded Image", use_column_width=True)
 
-# Gaze detection
-def eye_gaze_direction(frame):
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    faces = face_detector(gray)
-    for face in faces:
-        landmarks = predictor(gray, face)
-        nose = landmarks.part(30)
-        left_eye = landmarks.part(36)
-        right_eye = landmarks.part(45)
-        if nose.x < left_eye.x:
-            return "Looking Right"
-        elif nose.x > right_eye.x:
-            return "Looking Left"
-        else:
-            return "Looking Center"
-    return "No Face"
+    # Save image temporarily to process with Google Vision API
+    image_path = '/tmp/uploaded_image.jpg'
+    image.save(image_path)
 
-# Mobile detection
-def detect_mobile(frame):
-    results = model(frame, verbose=False)[0]
-    for r in results.boxes.cls:
-        if int(r) == 67:  # COCO class for cell phone
-            return True
-    return False
+    # Run Face Detection
+    faces = detect_faces(image_path)
+    st.write(f"Number of faces detected: {len(faces)}")
+    
+    # Run Mobile Phone Detection (via label detection)
+    labels = detect_labels(image_path)
+    if any(label in labels for label in ['mobile', 'phone', 'cellphone']):
+        st.warning("Mobile phone detected! Please ensure no mobile phone usage during the exam.")
 
-# Main webcam feed
-def run_proctor():
-    cap = cv2.VideoCapture(0)
-    alert_placeholder = st.empty()
-    frame_display = st.empty()
-    start = time.time()
-    absent_counter = 0
-    while time.time() - start < duration * 60:
-        ret, frame = cap.read()
-        if not ret:
-            break
+    # Display detected faces and any other relevant information
+    if faces:
+        st.write("Faces Detected:")
+        for i, face in enumerate(faces):
+            st.write(f"Face {i + 1}: Joy: {face.joy_likelihood}, Sorrow: {face.sorrow_likelihood}, Anger: {face.anger_likelihood}")
 
-        # Checks
-        if detect_mobile(frame):
-            alert_placeholder.error("📱 Mobile phone detected!")
-            st.session_state.logs.append((datetime.now(), "Mobile detected"))
-        elif detect_absent(frame):
-            absent_counter += 1
-            if absent_counter >= 5:
-                alert_placeholder.error("🚫 Candidate absent for >5s!")
-                st.session_state.logs.append((datetime.now(), "Absent"))
-        else:
-            direction = eye_gaze_direction(frame)
-            if direction != "Looking Center":
-                alert_placeholder.warning(f"👀 {direction}")
-                st.session_state.logs.append((datetime.now(), direction))
-            else:
-                alert_placeholder.empty()
+    # Log results for download (if needed)
+    log_data = {
+        "Detected Faces": len(faces),
+        "Detected Labels": labels,
+    }
+    log_df = pd.DataFrame([log_data])
+    st.download_button(
+        label="Download Proctoring Log",
+        data=log_df.to_csv(index=False),
+        file_name="proctoring_log.csv",
+        mime="text/csv"
+    )
 
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frame_display.image(frame, channels="RGB")
-
-    cap.release()
-    frame_display.empty()
-    alert_placeholder.success("✅ Proctoring Complete")
-
-# Random test
-with st.sidebar:
-    st.header("📝 Test Settings")
-    topic = st.text_input("Test Topic", "Python")
-    num_q = st.slider("No. of Questions", 5, 25, 10)
-    duration = st.slider("Test Duration (mins)", 1, 15, 5)
-    if st.button("Start Proctoring + Test"):
-        st.session_state.questions = generate_mcqs(topic, num_q)
-        st.session_state.start_time = time.time()
-        st.session_state.current_q = 0
-        st.session_state.score = 0
-        run_proctor()
-
-# Test UI
-if st.session_state.start_time:
-    if st.session_state.current_q < len(st.session_state.questions):
-        q = st.session_state.questions[st.session_state.current_q]
-        st.subheader(f"Q{st.session_state.current_q+1}: {q['question']}")
-        choice = st.radio("Options", q['options'], key=f"q{st.session_state.current_q}")
-        if st.button("Next"):
-            if choice == q['answer']:
-                st.session_state.score += 1
-            st.session_state.current_q += 1
-    else:
-        st.success(f"🎉 Test Completed! Score: {st.session_state.score}/{len(st.session_state.questions)}")
-
-        # Download logs
-        csv_data = "timestamp,event\n" + "\n".join([f"{ts},{ev}" for ts, ev in st.session_state.logs])
-        st.download_button("Download Logs CSV", csv_data, "logs.csv", "text/csv")
+# Optionally, other proctoring features can be added, such as tracking absences or face movements.
