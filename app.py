@@ -2,7 +2,7 @@ import streamlit as st
 import openai
 import os
 import json
-from streamlit_autorefresh import st_autorefresh
+import time
 
 # Load API key from environment
 openai.api_key = os.getenv("GROQ_API_KEY")
@@ -19,12 +19,13 @@ document.addEventListener("visibilitychange", () => {
         tabSwitches += 1;
         const countEl = window.parent.document.getElementById("switch-count");
         if (countEl) countEl.innerText = tabSwitches;
+        window.parent.postMessage({ type: 'TAB_SWITCH', count: tabSwitches }, "*");
     }
 });
 </script>
 """
 
-# Initialize session states
+# Initialize session state
 if 'quiz_started' not in st.session_state:
     st.session_state.quiz_started = False
 if 'submitted' not in st.session_state:
@@ -38,48 +39,39 @@ if 'tab_switches' not in st.session_state:
 if 'monitor_permission' not in st.session_state:
     st.session_state.monitor_permission = False
 
-# Inject JS + hidden DOM elements
+# Inject JS + hidden counter
 st.components.v1.html(
     tab_switch_script + """
     <div id='switch-count' style='display:none;'>0</div>
-    <div id='switch-count-value' style='display:none;'></div>
-    <script>
-    setInterval(() => {
-        const val = window.parent.document.getElementById('switch-count')?.innerText || "0";
-        document.getElementById('switch-count-value').innerText = val;
-    }, 500);
-    </script>
     """,
     height=0
 )
 
-# Auto refresh every 1 second to fetch tab count
-count = st_autorefresh(interval=1000, limit=None, key="refresh")
+# Helper: read tab count from frontend (JS → DOM → Streamlit)
+def read_tab_switch_count():
+    count_html = st.components.v1.html("""
+    <script>
+    const val = window.parent.document.getElementById('switch-count')?.innerText || "0";
+    document.body.innerText = val;
+    </script>
+    """, height=0)
+    try:
+        count = int(count_html)
+    except:
+        count = st.session_state.tab_switches
+    return count
 
-# Read tab count from hidden div
-switch_html = st.components.v1.html("""
-<div id="reader" style="display:none;">
-<script>
-const val = window.parent.document.getElementById('switch-count-value')?.innerText || "0";
-document.getElementById("reader").innerText = val;
-</script>
-</div>
-""", height=0)
+# Update tab switch count every refresh
+st.session_state.tab_switches = read_tab_switch_count()
 
-# Update session state
-try:
-    st.session_state.tab_switches = int(switch_html or "0")
-except:
-    st.session_state.tab_switches = 0
-
-# Display tab switch count
 tab_switch_placeholder = st.empty()
 tab_switch_placeholder.markdown(f"🔁 **Tab Switches: {st.session_state.tab_switches}**")
 
-# Function to generate MCQs
+# Generate MCQs
 def generate_mcqs(topic, num_questions):
     prompt = f"""
-    Generate exactly {num_questions} multiple choice questions on {topic}.
+    Generate {num_questions} unique multiple choice questions on {topic}.
+    Ensure that each question is different.
     Format STRICTLY as a JSON array like:
     [
         {{
@@ -89,7 +81,7 @@ def generate_mcqs(topic, num_questions):
         }},
         ...
     ]
-    Return only valid JSON array. No explanation, no notes.
+    Only output valid JSON array. No explanation, no notes.
     """
     try:
         response = openai.ChatCompletion.create(
@@ -101,18 +93,21 @@ def generate_mcqs(topic, num_questions):
         if isinstance(data, list) and len(data) == num_questions:
             return data
         else:
-            st.warning(f"Received {len(data)} questions instead of {num_questions}. Showing fallback.")
+            st.warning(f"⚠️ Received {len(data)} questions instead of {num_questions}. Showing fallback.")
             return sample_questions(num_questions)
     except Exception as e:
-        st.error("❌ Could not fetch questions. Using fallback.")
+        st.error(f"❌ Could not fetch questions: {e}. Using fallback.")
         return sample_questions(num_questions)
 
 def sample_questions(n):
-    return [{
-        "question": "What does CPU stand for?",
-        "options": ["Central Processing Unit", "Computer Personal Unit", "Central Performance Unit", "Core Processing Utility"],
-        "answer": "Central Processing Unit"
-    }] * n
+    return [
+        {
+            "question": f"What does CPU stand for? (variant {i+1})",
+            "options": ["Central Processing Unit", "Computer Personal Unit", "Central Performance Unit", "Core Processing Utility"],
+            "answer": "Central Processing Unit"
+        }
+        for i in range(n)
+    ]
 
 # Quiz setup
 if not st.session_state.quiz_started:
@@ -134,12 +129,13 @@ if not st.session_state.quiz_started:
                 st.session_state.submitted = False
                 st.session_state.answers = {}
                 st.session_state.tab_switches = 0
+                st.experimental_rerun()  # refresh page after start
 
 # Quiz in progress
 if st.session_state.quiz_started and not st.session_state.submitted:
     st.header("📝 Quiz In Progress")
     if st.session_state.monitor_permission:
-        st.markdown("⚠️ Tab switching is being monitored. Please stay focused on this tab!")
+        st.markdown("⚠️ Tab switching is being monitored. Please stay focused!")
     else:
         st.error("⚠️ Monitoring permission not granted.")
 
@@ -152,6 +148,7 @@ if st.session_state.quiz_started and not st.session_state.submitted:
         if submit:
             st.session_state.answers = answers
             st.session_state.submitted = True
+            st.experimental_rerun()  # refresh to results
 
 # Results
 if st.session_state.submitted:
