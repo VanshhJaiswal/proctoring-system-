@@ -1,8 +1,8 @@
 streamlit
-openai
-opencv-python
-fastapi
-uvicorn
+opencv-python-headless==4.7.0.72
+ultralytics
+pandas
+numpy
 python-dotenv
-streamlit-autorefresh
 groq
+requests
