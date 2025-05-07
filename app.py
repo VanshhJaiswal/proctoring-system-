@@ -1,150 +1,131 @@
-
 import streamlit as st
+import os
 import cv2
-import numpy as np
 import time
 import base64
-import os
+import json
 import requests
-from PIL import Image
-from io import BytesIO
+import tempfile
+import numpy as np
+from datetime import datetime
+from dotenv import load_dotenv
 
-# Load GROQ API key
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+# Load environment variables
+load_dotenv()
+GOOGLE_VISION_API_KEY = os.getenv("GOOGLE_VISION_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# Title
-st.set_page_config(page_title="AI Proctoring + Quiz", layout="centered")
-st.title("🎓 Smart AI Proctored Quiz")
+st.set_page_config(page_title="AI Proctoring System", layout="wide")
+st.title("📹 Smart AI Proctoring System")
 
-# Session state init
-if "quiz_started" not in st.session_state:
-    st.session_state.quiz_started = False
-if "questions" not in st.session_state:
-    st.session_state.questions = []
-if "answers" not in st.session_state:
-    st.session_state.answers = []
-if "start_time" not in st.session_state:
-    st.session_state.start_time = None
-if "proctoring_logs" not in st.session_state:
-    st.session_state.proctoring_logs = []
+# Functions
 
-# Utility: Quiz generation
-def generate_quiz():
+def capture_frame():
+    cap = cv2.VideoCapture(0)
+    ret, frame = cap.read()
+    cap.release()
+    if ret:
+        return frame
+    return None
+
+def image_to_base64(image):
+    _, buffer = cv2.imencode('.jpg', image)
+    return base64.b64encode(buffer).decode()
+
+def detect_faces_google_vision(base64_img):
+    url = f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_VISION_API_KEY}"
+    headers = {"Content-Type": "application/json"}
+    data = {
+        "requests": [
+            {
+                "image": {"content": base64_img},
+                "features": [
+                    {"type": "FACE_DETECTION"},
+                    {"type": "OBJECT_LOCALIZATION"}
+                ]
+            }
+        ]
+    }
+    response = requests.post(url, headers=headers, data=json.dumps(data))
+    return response.json()
+
+def analyze_google_response(response):
+    faces = response['responses'][0].get('faceAnnotations', [])
+    objects = response['responses'][0].get('localizedObjectAnnotations', [])
+    mobile_detected = any("phone" in obj['name'].lower() for obj in objects)
+    return len(faces), mobile_detected
+
+def trigger_random_quiz(num_questions=5, duration_minutes=5):
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
     }
+    prompt = f"Generate a {num_questions}-question multiple choice quiz on general knowledge. Each question should have 4 options and the correct answer indicated."
     data = {
-        "model": "mixtral-8x7b-32768",
+        "model": "llama3-8b-8192",
         "messages": [
-            {"role": "system", "content": "Generate a 5-question multiple-choice quiz on general knowledge. Each question should have 4 options labeled A-D, and provide the correct answer as 'Answer: A/B/C/D'."}
+            {"role": "user", "content": prompt}
         ]
     }
     response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=data)
+    return response.json()['choices'][0]['message']['content']
 
-    if response.status_code != 200:
-        st.error(f"Quiz generation failed. Status code: {response.status_code}")
-        st.text(response.text)
-        return []
+def log_alert(event, logs):
+    logs.append({"timestamp": datetime.now().isoformat(), "event": event})
 
-    try:
-        content = response.json()["choices"][0]["message"]["content"]
-        questions = []
-        for q in content.strip().split("\n\n"):
-            lines = q.strip().split("\n")
-            if len(lines) >= 5:
-                question_text = lines[0]
-                options = lines[1:5]
-                answer_line = lines[5] if len(lines) > 5 else ""
-                correct_answer = answer_line.split(":")[-1].strip() if ":" in answer_line else ""
-                questions.append({
-                    "question": question_text,
-                    "options": options,
-                    "answer": correct_answer
-                })
-        return questions
-    except Exception as e:
-        st.error(f"Parsing quiz content failed: {e}")
-        return []
+def download_logs(logs):
+    df = json.dumps(logs, indent=4)
+    with open("proctoring_log.json", "w") as f:
+        f.write(df)
+    return "proctoring_log.json"
 
-# Utility: Detect faces
-def detect_face(image):
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
-    return len(faces), faces
+# Main
+if "logs" not in st.session_state:
+    st.session_state.logs = []
 
-# Step 1: Camera snapshot
-if st.session_state.quiz_started:
-    st.subheader("👁️ Proctoring in Progress: Stay Focused")
-    uploaded_image = st.camera_input("📸 Snapshot (Required)")
-    if uploaded_image:
-        image = Image.open(uploaded_image)
-        img_array = np.array(image)
-        face_count, faces = detect_face(img_array)
-        log = {
-            "timestamp": time.time(),
-            "face_count": face_count,
-        }
-        if face_count == 0:
-            st.warning("⚠️ No face detected!")
-        elif face_count > 1:
-            st.warning("⚠️ Multiple faces detected!")
-        st.session_state.proctoring_logs.append(log)
+interval = st.slider("Quiz Interval (mins)", 1, 15, 5)
+num_questions = st.slider("Number of MCQs", 5, 25, 10)
+start_btn = st.button("Start Proctoring")
 
-# Step 2: Quiz UI
-if st.session_state.quiz_started and st.session_state.questions:
-    st.subheader("📝 Quiz Time!")
-    for i, q in enumerate(st.session_state.questions):
-        st.write(f"**Q{i+1}. {q['question']}**")
-        for opt in q["options"]:
-            st.radio("", options=q["options"], key=f"q_{i}")
+if start_btn:
+    st.info("Proctoring started. Monitoring via webcam...")
+    quiz_trigger_time = time.time() + interval * 60
 
-    if st.button("🧾 Submit Quiz"):
-        st.session_state.quiz_started = False
-        st.session_state.end_time = time.time()
+    while True:
+        frame = capture_frame()
+        if frame is None:
+            st.error("Camera not accessible")
+            break
 
-        # Evaluate answers
-        score = 0
-        results = []
-        for i, q in enumerate(st.session_state.questions):
-            selected = st.session_state.get(f"q_{i}")
-            correct = q["answer"]
-            is_correct = selected.startswith(correct)
-            results.append((q["question"], selected, correct, is_correct))
-            if is_correct:
-                score += 1
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        st.image(rgb_frame, channels="RGB")
 
-        duration = round(st.session_state.end_time - st.session_state.start_time, 2)
-        st.success(f"✅ Quiz Completed! Score: {score}/5 | Time: {duration}s")
+        base64_img = image_to_base64(frame)
+        response = detect_faces_google_vision(base64_img)
+        num_faces, mobile_detected = analyze_google_response(response)
 
-        st.subheader("📋 Result Summary:")
-        for q_text, sel, ans, correct in results:
-            st.write(f"- **{q_text}**")
-            st.write(f"  - Your Answer: {sel}")
-            st.write(f"  - Correct Answer: {ans}")
-            st.write(f"  - {'✅ Correct' if correct else '❌ Incorrect'}")
+        if num_faces == 0:
+            st.warning("❌ Candidate absent")
+            log_alert("Candidate absent", st.session_state.logs)
+        elif num_faces > 1:
+            st.warning("⚠️ Multiple faces detected")
+            log_alert("Multiple faces detected", st.session_state.logs)
 
-        st.subheader("🔒 Proctoring Report:")
-        total_logs = len(st.session_state.proctoring_logs)
-        no_face = sum(1 for log in st.session_state.proctoring_logs if log["face_count"] == 0)
-        multi_face = sum(1 for log in st.session_state.proctoring_logs if log["face_count"] > 1)
-        st.write(f"- Snapshots analyzed: {total_logs}")
-        st.write(f"- No face detected: {no_face}")
-        st.write(f"- Multiple faces detected: {multi_face}")
+        if mobile_detected:
+            st.warning("📱 Mobile phone detected!")
+            log_alert("Mobile phone detected", st.session_state.logs)
 
-        st.session_state.questions = []
-        st.session_state.proctoring_logs = []
+        if time.time() >= quiz_trigger_time:
+            quiz = trigger_random_quiz(num_questions=num_questions)
+            st.info("📝 Random Quiz:")
+            st.markdown(quiz)
+            quiz_trigger_time = time.time() + interval * 60
 
-# Step 3: Start Quiz
-if not st.session_state.quiz_started:
-    st.subheader("🚀 Launch Quiz")
-    if st.button("Start Quiz"):
-        questions = generate_quiz()
-        if questions:
-            st.session_state.questions = questions
-            st.session_state.quiz_started = True
-            st.session_state.start_time = time.time()
-            st.experimental_rerun()
-        else:
-            st.error("Quiz could not be generated. Please check your API key or try again later.")
+        if st.button("Stop Proctoring"):
+            st.success("Proctoring session ended.")
+            log_file = download_logs(st.session_state.logs)
+            with open(log_file, "rb") as f:
+                st.download_button("📥 Download Logs", f, file_name="proctoring_logs.json")
+            break
+
+        time.sleep(5)
