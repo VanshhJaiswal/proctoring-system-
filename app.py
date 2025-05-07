@@ -1,147 +1,136 @@
-import cv2
+
 import streamlit as st
-import mediapipe as mp
+import cv2
 import numpy as np
-import requests
-from transformers import pipeline
-import tempfile
+import mediapipe as mp
 import time
 import os
+import requests
+from PIL import Image
+from transformers import pipeline
+
+# Load Groq API Key from Streamlit Secrets
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+# Initialize Mediapipe face mesh and drawing utilities
+mp_face_mesh = mp.solutions.face_mesh
+mp_drawing = mp.solutions.drawing_utils
+face_mesh = mp_face_mesh.FaceMesh(min_detection_confidence=0.5, min_tracking_confidence=0.5)
+
+# Pose estimation using Mediapipe
+mp_pose = mp.solutions.pose
+pose = mp_pose.Pose()
 
 # Load Hugging Face QA model
 qa_pipeline = pipeline("question-answering", model="distilbert-base-cased-distilled-squad")
 
-# Load environment variable or set manually here
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "your_groq_key_here")  # Replace with your actual key or use .env
+# Detection log
+activity_log = []
 
-st.set_page_config(layout="wide")
-st.title("🧠 AI Proctored Test System")
+def detect_features(image):
+    report = []
+    img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-# ---- Groq API: Generate Questions ----
+    # Detect face landmarks
+    face_results = face_mesh.process(img_rgb)
+    if face_results.multi_face_landmarks:
+        report.append("✅ Face detected")
+
+        for landmarks in face_results.multi_face_landmarks:
+            # Detect mouth opening (based on distance between upper and lower lips)
+            upper_lip = landmarks.landmark[13]
+            lower_lip = landmarks.landmark[14]
+            lip_distance = abs(upper_lip.y - lower_lip.y)
+            if lip_distance > 0.03:
+                report.append("⚠️ Mouth open detected")
+
+    else:
+        report.append("❌ No face detected")
+
+    # Pose estimation (to infer head pose roughly)
+    pose_results = pose.process(img_rgb)
+    if pose_results.pose_landmarks:
+        head_y = pose_results.pose_landmarks.landmark[mp_pose.PoseLandmark.NOSE].y
+        left_ear_y = pose_results.pose_landmarks.landmark[mp_pose.PoseLandmark.LEFT_EAR].y
+        if abs(head_y - left_ear_y) > 0.05:
+            report.append("⚠️ Head pose unusual")
+
+    # Simulated phone detection — crude detection using rectangle assumptions (placeholder)
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    phones = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, 1.2, 100)
+    if phones is not None:
+        report.append("📱 Phone-like object detected")
+
+    return report
+
 def generate_mock_questions():
+    url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
     }
-
-    payload = {
-        "model": "mixtral-8x7b-32768",
+    data = {
+        "model": "llama3-8b-8192",
         "messages": [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "Create 5 general knowledge multiple choice questions with 4 options and indicate the correct answer."}
+            {"role": "user", "content": "Generate 5 multiple-choice general knowledge questions with 4 options each and indicate the correct option."}
         ],
         "temperature": 0.7
     }
+    response = requests.post(url, headers=headers, json=data)
+    result = response.json()
 
-    try:
-        response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
-        result = response.json()
-        st.write("Mock Questions JSON Response:", result)  # Debug only
+    if "error" in result:
+        st.error(f"Groq API Error: {result['error']['message']}")
+        return []
 
-        if 'choices' in result and len(result['choices']) > 0:
-            return result['choices'][0]['message']['content']
-        else:
-            return "Error: No content received from Groq API."
+    return result['choices'][0]['message']['content']
 
-    except Exception as e:
-        return f"Groq API call failed: {str(e)}"
+def run_test():
+    st.title("🎓 Smart Proctored Mock Test System")
+    st.write("This test monitors you in real-time using face, mouth, head, and phone detection. Answer the questions after the timer.")
 
-# ---- Mouth Open Detection ----
-def detect_mouth_open(image, landmarks):
-    top_lip = landmarks.landmark[13]
-    bottom_lip = landmarks.landmark[14]
-    lip_distance = abs(top_lip.y - bottom_lip.y)
-    return lip_distance > 0.03
+    mock_questions = generate_mock_questions()
+    if not mock_questions:
+        return
 
-# ---- Head Pose Estimation ----
-def estimate_head_pose(image, landmarks):
-    nose_tip = landmarks.landmark[1]
-    if nose_tip.x < 0.3:
-        return "Looking Right"
-    elif nose_tip.x > 0.7:
-        return "Looking Left"
-    else:
-        return "Looking Center"
+    st.subheader("📄 AI-Generated Mock Test")
+    st.markdown(mock_questions)
 
-# ---- Proctoring: Face, Mouth, Pose, Phone ----
-def run_proctoring():
+    # Start camera
+    run_time = st.slider("Test Duration (seconds)", 10, 60, 20)
     stframe = st.empty()
-    mp_face = mp.solutions.face_mesh
-    mp_drawing = mp.solutions.drawing_utils
-    face_mesh = mp_face.FaceMesh()
-
-    cap = cv2.VideoCapture(0)
-
-    violations = []
-
+    camera = cv2.VideoCapture(0)
     start_time = time.time()
-    while time.time() - start_time < 30:  # 30 seconds test
-        ret, frame = cap.read()
+
+    while time.time() - start_time < run_time:
+        ret, frame = camera.read()
         if not ret:
-            break
+            continue
+        frame = cv2.flip(frame, 1)
+        detections = detect_features(frame)
+        activity_log.extend(detections)
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = face_mesh.process(rgb)
+        for d in detections:
+            cv2.putText(frame, d, (10, 25 + 30 * detections.index(d)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-        if results.multi_face_landmarks:
-            for landmarks in results.multi_face_landmarks:
-                mp_drawing.draw_landmarks(frame, landmarks, mp_face.FACEMESH_CONTOURS)
-
-                if detect_mouth_open(frame, landmarks):
-                    violations.append("Mouth Open")
-
-                head_pose = estimate_head_pose(frame, landmarks)
-                if head_pose != "Looking Center":
-                    violations.append(f"Head Pose: {head_pose}")
-
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        phone_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_mobilephone.xml')
-        phones = phone_cascade.detectMultiScale(gray, 1.3, 5)
-        for (x, y, w, h) in phones:
-            cv2.rectangle(frame, (x,y), (x+w,y+h), (255,0,0), 2)
-            violations.append("Phone Detected")
-
-        frame = cv2.resize(frame, (640, 480))
         stframe.image(frame, channels="BGR")
 
-    cap.release()
-    return list(set(violations))
+    camera.release()
+    st.success("Test completed. Scroll down to download report.")
 
-# ---- Run the App ----
-if st.button("🧪 Start Proctored Test"):
-    with st.spinner("Proctoring in progress..."):
-        violations = run_proctoring()
+    # Show report
+    st.subheader("📊 Proctoring Report")
+    unique_logs = list(set(activity_log))
+    for log in unique_logs:
+        st.write(f"- {log}")
 
-    st.success("✅ Proctoring complete.")
-    st.write("🔍 Violations detected:", violations)
+    # Generate downloadable report
+    report_text = "\n".join(unique_logs)
+    with open("proctoring_report.txt", "w") as f:
+        f.write(report_text)
 
-    st.markdown("---")
-    st.subheader("📄 AI-Generated Mock Questions")
+    with open("proctoring_report.txt", "rb") as f:
+        st.download_button("📥 Download Report", f, file_name="Proctoring_Report.txt")
 
-    questions_text = generate_mock_questions()
-    st.text_area("📝 Questions", questions_text, height=250)
-
-    st.markdown("---")
-    st.subheader("✅ Answer Any Question")
-
-    context = st.text_area("Paste the full question text here:")
-    question = st.text_input("Type your answer question here (e.g., 'What is the capital of India?')")
-
-    if st.button("Check Answer"):
-        try:
-            result = qa_pipeline(question=question, context=context)
-            st.write("Answer:", result['answer'])
-        except Exception as e:
-            st.error(f"Error: {e}")
-
-    # Download Result
-    st.markdown("---")
-    st.subheader("📥 Download Test Report")
-    if st.button("📤 Download Result as .txt"):
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as tmp:
-            tmp.write(f"Violations Detected:\n{violations}\n\nMock Questions:\n{questions_text}".encode())
-            tmp_path = tmp.name
-
-        with open(tmp_path, "rb") as f:
-            st.download_button("Download Result", f, file_name="proctored_test_result.txt")
-
+if __name__ == "__main__" or __name__ == "__streamlit__":
+    run_test()
