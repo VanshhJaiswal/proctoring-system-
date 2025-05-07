@@ -15,10 +15,7 @@ from dotenv import load_dotenv
 import threading
 import mediapipe as mp
 import streamlit_javascript as st_js
-from groq import Groq
-
-# Load environment variables
-load_dotenv()
+import sys
 
 # Set page configuration
 st.set_page_config(
@@ -28,6 +25,9 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Load environment variables
+load_dotenv()
+
 # Initialize MediaPipe face detection and face mesh
 mp_face_detection = mp.solutions.face_detection
 mp_face_mesh = mp.solutions.face_mesh
@@ -35,9 +35,20 @@ mp_drawing = mp.solutions.drawing_utils
 face_detection = mp_face_detection.FaceDetection(min_detection_confidence=0.5)
 face_mesh = mp_face_mesh.FaceMesh(min_detection_confidence=0.5, min_tracking_confidence=0.5)
 
-# Groq client
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+# Initialize Groq client - Check if API key is available
+groq_api_key = os.getenv("GROQ_API_KEY")
+groq_client = None
 GROQ_MODEL = "llama3-8b-8192"  # Using Llama 3 8B model which is free to use
+
+# Import Groq only if API key is available
+try:
+    from groq import Groq
+    if groq_api_key:
+        groq_client = Groq(api_key=groq_api_key)
+    else:
+        st.sidebar.error("GROQ_API_KEY not found. Please add it to your .env file or Streamlit secrets.")
+except ImportError:
+    st.sidebar.error("The groq package is not installed. Please make sure it's in your requirements.txt file.")
 
 # Session state initialization
 if 'start_time' not in st.session_state:
@@ -103,7 +114,49 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 def generate_quiz(topic, difficulty, num_questions, time_limit):
-    """Generate a quiz using Groq API"""
+    """Generate a quiz using Groq API or fallback to demo data if API is unavailable"""
+    # Check if Groq client is available
+    if groq_client is None:
+        st.warning("Groq API key not configured. Using demo quiz data.")
+        # Return a demo quiz instead
+        return {
+            "title": f"Demo Quiz: {topic}",
+            "description": f"This is a demo {difficulty.lower()} quiz on {topic}. Add your Groq API key to generate custom quizzes.",
+            "time_limit_minutes": time_limit,
+            "questions": [
+                {
+                    "id": 1,
+                    "question": "What does AI stand for?",
+                    "options": ["Artificial Intelligence", "Automated Information", "Augmented Interface", "Algorithmic Integration"],
+                    "correct_answer": "A"
+                },
+                {
+                    "id": 2,
+                    "question": "Which of these is not a popular programming language?",
+                    "options": ["Python", "JavaScript", "HTML", "MadeUpLang"],
+                    "correct_answer": "D"
+                },
+                {
+                    "id": 3,
+                    "question": "What is the main purpose of proctoring software?",
+                    "options": ["Entertainment", "Monitoring during exams", "Video editing", "Social networking"],
+                    "correct_answer": "B"
+                },
+                {
+                    "id": 4,
+                    "question": "Which technology is commonly used for face detection?",
+                    "options": ["GPS", "Computer Vision", "Blockchain", "5G"],
+                    "correct_answer": "B"
+                },
+                {
+                    "id": 5,
+                    "question": "What does ML stand for in tech?",
+                    "options": ["Multiple Layers", "Machine Learning", "Meta Language", "Mobile Logic"],
+                    "correct_answer": "B"
+                }
+            ]
+        }
+    
     try:
         prompt = f"""
         Create a quiz on the topic of {topic} with {num_questions} questions.
@@ -161,7 +214,32 @@ def generate_quiz(topic, difficulty, num_questions, time_limit):
     
     except Exception as e:
         st.error(f"Error generating quiz: {str(e)}")
-        return None
+        # Return a demo quiz as fallback
+        return {
+            "title": f"Fallback Quiz: {topic}",
+            "description": f"This is a fallback {difficulty.lower()} quiz on {topic} because there was an error with the Groq API.",
+            "time_limit_minutes": time_limit,
+            "questions": [
+                {
+                    "id": 1,
+                    "question": "What does AI stand for?",
+                    "options": ["Artificial Intelligence", "Automated Information", "Augmented Interface", "Algorithmic Integration"],
+                    "correct_answer": "A"
+                },
+                {
+                    "id": 2,
+                    "question": "Which programming language is often used for data science?",
+                    "options": ["Java", "C++", "Python", "Ruby"],
+                    "correct_answer": "C"
+                },
+                {
+                    "id": 3,
+                    "question": "What is computer vision primarily used for?",
+                    "options": ["Image processing", "Audio analysis", "Text generation", "Network security"],
+                    "correct_answer": "A"
+                }
+            ]
+        }
 
 def detect_blinks(landmarks, face_oval):
     """Detect eye blinks using facial landmarks"""
