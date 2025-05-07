@@ -1,4 +1,4 @@
-streamlit==1.35.0
-groq>=0.5.0
-requests==2.31.0
-streamlit-js-eval==0.1.5
+streamlit
+python-dotenv
+requests
+pandas
