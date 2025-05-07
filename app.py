@@ -6,45 +6,44 @@ import time
 from dotenv import load_dotenv
 from datetime import datetime
 
-# Load API Key
+# Load .env variables
 load_dotenv()
-GOOGLE_VISION_API_KEY = os.getenv("GOOGLE_VISION_API_KEY")
+GOOGLE_VISION_API_KEY = os.environ.get("GOOGLE_VISION_API_KEY")
 
+# Set up auto-refresh interval (in seconds)
+REFRESH_INTERVAL = 10
+
+# Auto-refresh logic before rendering any UI
+if "last_run" not in st.session_state:
+    st.session_state.last_run = time.time()
+    st.session_state.image_counter = 0
+else:
+    now = time.time()
+    if now - st.session_state.last_run > REFRESH_INTERVAL:
+        st.session_state.last_run = now
+        st.session_state.image_counter += 1
+        st.experimental_rerun()
+
+# Safety check for missing API key
 if not GOOGLE_VISION_API_KEY:
     st.error("Google Vision API Key missing. Please set it in .env file.")
     st.stop()
 
-# Streamlit page setup
-st.set_page_config(page_title="🎓 Live Proctoring System", page_icon="🎥")
-st.title("🎓 Online Proctoring System with Google Vision API (Live Snapshot)")
+# UI
+st.set_page_config(page_title="🎓 Proctoring System", page_icon="🎥")
+st.title("🎓 Online Proctoring System with Google Vision API")
 
-# Refresh interval in seconds
-REFRESH_INTERVAL = 5
-
-# Session state variables
-if "last_run" not in st.session_state:
-    st.session_state.last_run = time.time()
-if "image_counter" not in st.session_state:
-    st.session_state.image_counter = 0
-
-# Trigger rerun after interval
-now = time.time()
-if now - st.session_state.last_run > REFRESH_INTERVAL:
-    st.session_state.last_run = now
-    st.session_state.image_counter += 1
-    st.experimental_rerun()
-
-# Capture image with dynamic key
+# Use unique key per refresh to avoid StreamlitDuplicateElementId
 camera_key = f"camera_{st.session_state.image_counter}"
-uploaded_image = st.camera_input("📸 Live Snapshot (auto-refresh every 5 sec)", key=camera_key)
+uploaded_image = st.camera_input("📸 Take a snapshot for analysis", key=camera_key)
 
-if uploaded_image is not None:
+if uploaded_image:
     st.info("Analyzing image...")
 
-    # Encode image
     image_bytes = uploaded_image.getvalue()
     image_b64 = base64.b64encode(image_bytes).decode('utf-8')
 
+    # Prepare request
     vision_url = f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_VISION_API_KEY}"
     vision_payload = {
         "requests": [{
@@ -56,11 +55,10 @@ if uploaded_image is not None:
         }]
     }
 
-    # Call Google Vision API
-    response = requests.post(vision_url, json=vision_payload)
-    result = response.json()
+    # Call API
+    resp = requests.post(vision_url, json=vision_payload)
+    result = resp.json()
 
-    # Logging setup
     log_lines = [f"{datetime.now()} - Proctoring Log"]
 
     ### FACE DETECTION ###
@@ -76,32 +74,30 @@ if uploaded_image is not None:
         st.warning(f"⚠️ Multiple faces detected ({num_faces})! Possible unauthorized person.")
     else:
         st.success("✅ 1 face detected.")
-
         face = faces[0]
+
         roll = face.get('rollAngle', 0)
         pan = face.get('panAngle', 0)
         tilt = face.get('tiltAngle', 0)
-
         st.write(f"Head Pose: Roll={roll:.2f}, Pan={pan:.2f}, Tilt={tilt:.2f}")
         log_lines.append(f"Head Pose: Roll={roll:.2f}, Pan={pan:.2f}, Tilt={tilt:.2f}")
 
         if abs(pan) > 20 or abs(tilt) > 20:
             st.warning("⚠️ Head turned away from screen.")
 
-        left_eye = face.get('leftEyeOpenLikelihood', 'UNKNOWN')
-        right_eye = face.get('rightEyeOpenLikelihood', 'UNKNOWN')
-        mouth = face.get('mouthOpenLikelihood', 'UNKNOWN')
+        left_eye_open = face.get('leftEyeOpenLikelihood', 'UNKNOWN')
+        right_eye_open = face.get('rightEyeOpenLikelihood', 'UNKNOWN')
+        st.write(f"Eyes Open Likelihood: Left={left_eye_open}, Right={right_eye_open}")
+        log_lines.append(f"Eyes Open Likelihood: Left={left_eye_open}, Right={right_eye_open}")
 
-        st.write(f"Eyes Open Likelihood: Left={left_eye}, Right={right_eye}")
-        log_lines.append(f"Eyes Open Likelihood: Left={left_eye}, Right={right_eye}")
-
-        if left_eye in ['VERY_UNLIKELY', 'UNLIKELY'] and right_eye in ['VERY_UNLIKELY', 'UNLIKELY']:
+        if left_eye_open in ['VERY_UNLIKELY', 'UNLIKELY'] and right_eye_open in ['VERY_UNLIKELY', 'UNLIKELY']:
             st.warning("⚠️ Eyes possibly closed.")
 
-        st.write(f"Mouth Open Likelihood: {mouth}")
-        log_lines.append(f"Mouth Open Likelihood: {mouth}")
+        mouth_open = face.get('mouthOpenLikelihood', 'UNKNOWN')
+        st.write(f"Mouth Open Likelihood: {mouth_open}")
+        log_lines.append(f"Mouth Open Likelihood: {mouth_open}")
 
-        if mouth in ['LIKELY', 'VERY_LIKELY']:
+        if mouth_open in ['LIKELY', 'VERY_LIKELY']:
             st.warning("⚠️ Mouth is open (possible talking).")
 
     ### OBJECT DETECTION ###
@@ -122,7 +118,7 @@ if uploaded_image is not None:
     else:
         st.success("✅ No phone detected.")
 
-    # Save and download log
+    # Save log
     log_text = "\n".join(log_lines)
     with open("proctoring_log.txt", "a") as f:
         f.write(log_text + "\n")
