@@ -41,7 +41,7 @@ if 'monitor_permission' not in st.session_state:
 # Inject JS
 st.components.v1.html(tab_switch_script + "<div id='switch-count' style='display:none;'>0</div>", height=0)
 
-# JavaScript message listener to capture tab switches
+# JavaScript listener to capture tab switches
 def set_tab_switch_count_js():
     st.components.v1.html("""
     <script>
@@ -50,7 +50,6 @@ def set_tab_switch_count_js():
             const count = event.data.count;
             const el = window.parent.document.querySelector('section.main div.block-container div:nth-child(1)');
             if (el) el.innerHTML = "🔁 <b>Tab Switches:</b> " + count;
-            window.parent.postMessage({ type: 'SAVE_TAB_SWITCH', count: count }, "*");
         }
     });
     </script>
@@ -58,12 +57,9 @@ def set_tab_switch_count_js():
 
 set_tab_switch_count_js()
 
-# Capture tab switches (listen for postMessage and store in session_state)
+# Show tab switch count placeholder
 tab_switch_placeholder = st.empty()
 tab_switch_placeholder.markdown(f"🔁 **Tab Switches: {st.session_state.tab_switches}**")
-
-# JS bridge simulation for updating session_state
-st.experimental_data_editor({"tab_switches": st.session_state.tab_switches}, disabled=True)
 
 def generate_mcqs(topic, num_questions):
     prompt = f"""
@@ -147,17 +143,12 @@ if st.session_state.submitted:
         st.markdown("---")
 
     st.success(f"🎯 Final Score: {correct}/{len(st.session_state.questions)}")
-    
-    # Retrieve tab switches from DOM
-    switch_count_str = st.experimental_get_query_params().get('tab_switches', ['0'])[0]
-    try:
-        recorded_switches = int(switch_count_str)
-    except:
-        recorded_switches = st.session_state.tab_switches
-    
-    st.warning(f"📉 You switched tabs **{recorded_switches} times** during the quiz.")
-    if recorded_switches > 2:
-        st.error("⚠️ High tab switching detected. Exam may be flagged for review.")
-    else:
-        st.success("✅ Acceptable tab switching behavior.")
+
+    # Get tab switch count from DOM
+    st.warning("📉 Note: Tab switching was monitored in-browser.")
+    st.info("⚠️ Actual tab switch count is displayed at the top of the page (check 🔁 Tab Switches).")
+    st.markdown("""
+    👉 **Manual check required**: JavaScript counted the switches; integration to backend needs StreamlitComponent/WebSocket for automatic recording.
+    """)
+    st.warning("⚠️ Please visually check the 🔁 Tab Switches count displayed on top.")
 
