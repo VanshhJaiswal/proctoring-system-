@@ -2,10 +2,9 @@ import streamlit as st
 import openai
 import os
 import json
-import time
 
-# Load API key from environment
-openai.api_key = os.getenv("GROQ_API_KEY")
+# Initialize OpenAI client (for openai>=1.0.0)
+client = openai.OpenAI(api_key=os.getenv("GROQ_API_KEY"))
 MODEL_NAME = "mixtral-8x7b-32768"
 
 st.set_page_config(page_title="AI Proctored Quiz", layout="wide")
@@ -71,7 +70,7 @@ tab_switch_placeholder.markdown(f"🔁 **Tab Switches: {st.session_state.tab_swi
 def generate_mcqs(topic, num_questions):
     prompt = f"""
     Generate {num_questions} unique multiple choice questions on {topic}.
-    Ensure that each question is different.
+    Ensure each question is different.
     Format STRICTLY as a JSON array like:
     [
         {{
@@ -81,14 +80,14 @@ def generate_mcqs(topic, num_questions):
         }},
         ...
     ]
-    Only output valid JSON array. No explanation, no notes.
+    Only output valid JSON array. No explanation.
     """
     try:
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[{"role": "user", "content": prompt}]
         )
-        content = response['choices'][0]['message']['content']
+        content = response.choices[0].message.content
         data = json.loads(content)
         if isinstance(data, list) and len(data) == num_questions:
             return data
@@ -129,7 +128,7 @@ if not st.session_state.quiz_started:
                 st.session_state.submitted = False
                 st.session_state.answers = {}
                 st.session_state.tab_switches = 0
-                st.experimental_rerun()  # refresh page after start
+                st.experimental_rerun()  # refresh after start
 
 # Quiz in progress
 if st.session_state.quiz_started and not st.session_state.submitted:
@@ -170,4 +169,3 @@ if st.session_state.submitted:
         st.warning("📉 Tab switching may affect evaluation credibility.")
     else:
         st.success("✅ No tab switches detected. Great focus!")
-
