@@ -3,9 +3,9 @@ import groq
 import os
 import json
 
-# Initialize Groq client
+# Initialize Groq client with the updated model
 client = groq.Groq(api_key=os.getenv("GROQ_API_KEY"))
-MODEL_NAME = "mixtral-8x7b-32768"
+MODEL_NAME = "meta-llama/llama-4-scout-17b-16e-instruct"  # Updated model name
 
 st.set_page_config(page_title="AI Proctored Quiz", layout="wide")
 
@@ -44,7 +44,7 @@ st.components.v1.html(
 )
 
 def read_tab_switch_count():
-    count_html = st.components.v1.html("""
+    count_html = st.components.v1.html(""" 
     <script>
     const val = window.parent.document.getElementById('switch-count')?.innerText || "0";
     document.body.innerText = val;
