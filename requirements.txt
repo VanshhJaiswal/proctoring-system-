@@ -2,7 +2,5 @@ streamlit
 opencv-python-headless
 mediapipe
 transformers
-torch
-pandas
-python-dotenv
 requests
+torch
