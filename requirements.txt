@@ -1,4 +1,6 @@
 streamlit
+openai
+opencv-python
+fastapi
+uvicorn
 python-dotenv
-requests
-pandas
