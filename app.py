@@ -1,63 +1,51 @@
 import streamlit as st
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
-import av
-import mediapipe as mp
 import cv2
 import numpy as np
+import mediapipe as mp
+from datetime import datetime
 
-mp_face_detection = mp.solutions.face_detection
-mp_face_mesh = mp.solutions.face_mesh
+st.title("Online Proctoring System (Streamlit)")
 
-class MediapipeTransformer(VideoTransformerBase):
-    def __init__(self):
-        self.face_detection = mp_face_detection.FaceDetection(min_detection_confidence=0.5)
-        self.face_mesh = mp_face_mesh.FaceMesh(refine_landmarks=True)
+st.markdown("""
+This system checks for:
+- Face presence
+- Multiple faces detection
+""")
+
+uploaded_image = st.camera_input("Take a snapshot to verify")
+
+if uploaded_image is not None:
+    # Convert to numpy array
+    file_bytes = np.asarray(bytearray(uploaded_image.read()), dtype=np.uint8)
+    img = cv2.imdecode(file_bytes, 1)
     
-    def transform(self, frame):
-        img = frame.to_ndarray(format="bgr24")
+    # Initialize Mediapipe Face Detection
+    mp_face_detection = mp.solutions.face_detection
+    mp_drawing = mp.solutions.drawing_utils
+
+    with mp_face_detection.FaceDetection(model_selection=0, min_detection_confidence=0.5) as face_detection:
+        # Convert image to RGB
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        
-        results = self.face_detection.process(img_rgb)
-        mesh_results = self.face_mesh.process(img_rgb)
-        
+        results = face_detection.process(img_rgb)
+
+        # Count faces
+        num_faces = 0
         if results.detections:
+            num_faces = len(results.detections)
             for detection in results.detections:
-                bboxC = detection.location_data.relative_bounding_box
-                ih, iw, _ = img.shape
-                x,y,w,h = int(bboxC.xmin * iw), int(bboxC.ymin * ih), int(bboxC.width * iw), int(bboxC.height * ih)
-                cv2.rectangle(img, (x,y), (x+w,y+h), (0,255,0), 2)
-        
-        if mesh_results.multi_face_landmarks:
-            for face_landmarks in mesh_results.multi_face_landmarks:
-                # mouth open detection (landmark 13 = upper lip, 14 = lower lip)
-                top_lip = face_landmarks.landmark[13]
-                bottom_lip = face_landmarks.landmark[14]
-                
-                ih, iw, _ = img.shape
-                top = np.array([int(top_lip.x * iw), int(top_lip.y * ih)])
-                bottom = np.array([int(bottom_lip.x * iw), int(bottom_lip.y * ih)])
-                
-                distance = np.linalg.norm(top - bottom)
-                
-                cv2.circle(img, tuple(top), 2, (0,255,0), -1)
-                cv2.circle(img, tuple(bottom), 2, (0,0,255), -1)
-                cv2.line(img, tuple(top), tuple(bottom), (255,0,0), 2)
-                
-                if distance > 15:
-                    cv2.putText(img, "Mouth Open!", (30, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
-        
-        return img
+                mp_drawing.draw_detection(img, detection)
 
-st.title("AI Proctoring with Mediapipe")
-st.write("Click start to begin webcam monitoring.")
+        st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), channels="RGB", caption=f"Detected {num_faces} face(s)")
 
-rtc_config = {
-    "iceServers": [{"urls": "stun:stun.l.google.com:19302"}]
-}
+        if num_faces == 0:
+            st.error("⚠️ No face detected! Please stay in front of the camera.")
+        elif num_faces > 1:
+            st.warning(f"⚠️ Multiple faces detected! ({num_faces} faces)")
+        else:
+            st.success("✅ Face detected successfully. You may continue.")
 
-webrtc_streamer(
-    key="proctor",
-    video_transformer_factory=MediapipeTransformer,
-    rtc_configuration=rtc_config,
-    media_stream_constraints={"video": True, "audio": False}
-)
+        # Save log
+        with open("log.txt", "a") as f:
+            f.write(f"{datetime.now()} - Faces detected: {num_faces}\n")
+        st.write("Log updated.")
+
