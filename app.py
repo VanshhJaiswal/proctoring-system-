@@ -2,6 +2,7 @@ import streamlit as st
 import openai
 import os
 import json
+from streamlit_autorefresh import st_autorefresh
 
 # Load API key from environment
 openai.api_key = os.getenv("GROQ_API_KEY")
@@ -9,7 +10,7 @@ MODEL_NAME = "mixtral-8x7b-32768"
 
 st.set_page_config(page_title="AI Proctored Quiz", layout="wide")
 
-# JS for tab switch detection (injects a counter into the DOM)
+# Inject JS to track tab switches
 tab_switch_script = """
 <script>
 let tabSwitches = 0;
@@ -18,13 +19,12 @@ document.addEventListener("visibilitychange", () => {
         tabSwitches += 1;
         const countEl = window.parent.document.getElementById("switch-count");
         if (countEl) countEl.innerText = tabSwitches;
-        window.parent.postMessage({ type: 'TAB_SWITCH', count: tabSwitches }, "*");
     }
 });
 </script>
 """
 
-# Initialize states
+# Initialize session states
 if 'quiz_started' not in st.session_state:
     st.session_state.quiz_started = False
 if 'submitted' not in st.session_state:
@@ -38,33 +38,49 @@ if 'tab_switches' not in st.session_state:
 if 'monitor_permission' not in st.session_state:
     st.session_state.monitor_permission = False
 
-# Inject JS
-st.components.v1.html(tab_switch_script + "<div id='switch-count' style='display:none;'>0</div>", height=0)
-
-# JavaScript listener to capture tab switches
-def set_tab_switch_count_js():
-    st.components.v1.html("""
+# Inject JS + hidden DOM elements
+st.components.v1.html(
+    tab_switch_script + """
+    <div id='switch-count' style='display:none;'>0</div>
+    <div id='switch-count-value' style='display:none;'></div>
     <script>
-    window.addEventListener("message", (event) => {
-        if (event.data.type === "TAB_SWITCH") {
-            const count = event.data.count;
-            const el = window.parent.document.querySelector('section.main div.block-container div:nth-child(1)');
-            if (el) el.innerHTML = "🔁 <b>Tab Switches:</b> " + count;
-        }
-    });
+    setInterval(() => {
+        const val = window.parent.document.getElementById('switch-count')?.innerText || "0";
+        document.getElementById('switch-count-value').innerText = val;
+    }, 500);
     </script>
-    """, height=0)
+    """,
+    height=0
+)
 
-set_tab_switch_count_js()
+# Auto refresh every 1 second to fetch tab count
+count = st_autorefresh(interval=1000, limit=None, key="refresh")
 
-# Show tab switch count placeholder
+# Read tab count from hidden div
+switch_html = st.components.v1.html("""
+<div id="reader" style="display:none;">
+<script>
+const val = window.parent.document.getElementById('switch-count-value')?.innerText || "0";
+document.getElementById("reader").innerText = val;
+</script>
+</div>
+""", height=0)
+
+# Update session state
+try:
+    st.session_state.tab_switches = int(switch_html or "0")
+except:
+    st.session_state.tab_switches = 0
+
+# Display tab switch count
 tab_switch_placeholder = st.empty()
 tab_switch_placeholder.markdown(f"🔁 **Tab Switches: {st.session_state.tab_switches}**")
 
+# Function to generate MCQs
 def generate_mcqs(topic, num_questions):
     prompt = f"""
-    Generate {num_questions} multiple choice questions on {topic}.
-    Format strictly as a valid JSON array like:
+    Generate exactly {num_questions} multiple choice questions on {topic}.
+    Format STRICTLY as a JSON array like:
     [
         {{
             "question": "What is Python?",
@@ -73,6 +89,7 @@ def generate_mcqs(topic, num_questions):
         }},
         ...
     ]
+    Return only valid JSON array. No explanation, no notes.
     """
     try:
         response = openai.ChatCompletion.create(
@@ -80,16 +97,24 @@ def generate_mcqs(topic, num_questions):
             messages=[{"role": "user", "content": prompt}]
         )
         content = response['choices'][0]['message']['content']
-        return json.loads(content)
+        data = json.loads(content)
+        if isinstance(data, list) and len(data) == num_questions:
+            return data
+        else:
+            st.warning(f"Received {len(data)} questions instead of {num_questions}. Showing fallback.")
+            return sample_questions(num_questions)
     except Exception as e:
-        st.error("❌ Could not fetch questions. Using sample fallback.")
-        return [{
-            "question": "What does CPU stand for?",
-            "options": ["Central Processing Unit", "Computer Personal Unit", "Central Performance Unit", "Core Processing Utility"],
-            "answer": "Central Processing Unit"
-        }]
+        st.error("❌ Could not fetch questions. Using fallback.")
+        return sample_questions(num_questions)
 
-# Quiz setup form
+def sample_questions(n):
+    return [{
+        "question": "What does CPU stand for?",
+        "options": ["Central Processing Unit", "Computer Personal Unit", "Central Performance Unit", "Core Processing Utility"],
+        "answer": "Central Processing Unit"
+    }] * n
+
+# Quiz setup
 if not st.session_state.quiz_started:
     st.title("🧠 AI Proctored Quiz")
     with st.form("quiz_form"):
@@ -97,11 +122,11 @@ if not st.session_state.quiz_started:
         num_qs = st.slider("❓ Number of Questions", 1, 10, 3)
         duration = st.slider("⏱️ Duration (minutes)", 1, 30, 5)
         allow = st.checkbox("✅ I allow tab monitoring for proctoring (Required)")
-
         start = st.form_submit_button("🚀 Start Quiz")
+
         if start:
             if not allow:
-                st.error("❌ Permission is required to start the quiz. Please check the box.")
+                st.error("❌ Permission required to proceed.")
             else:
                 st.session_state.monitor_permission = True
                 st.session_state.questions = generate_mcqs(topic, num_qs)
@@ -114,9 +139,9 @@ if not st.session_state.quiz_started:
 if st.session_state.quiz_started and not st.session_state.submitted:
     st.header("📝 Quiz In Progress")
     if st.session_state.monitor_permission:
-        st.markdown("⚠️ Tab switching is monitored. Please stay on this tab!")
+        st.markdown("⚠️ Tab switching is being monitored. Please stay focused on this tab!")
     else:
-        st.error("Monitoring permission was not granted. Quiz may be invalid.")
+        st.error("⚠️ Monitoring permission not granted.")
 
     answers = {}
     with st.form("mcq_form"):
@@ -143,12 +168,9 @@ if st.session_state.submitted:
         st.markdown("---")
 
     st.success(f"🎯 Final Score: {correct}/{len(st.session_state.questions)}")
-
-    # Get tab switch count from DOM
-    st.warning("📉 Note: Tab switching was monitored in-browser.")
-    st.info("⚠️ Actual tab switch count is displayed at the top of the page (check 🔁 Tab Switches).")
-    st.markdown("""
-    👉 **Manual check required**: JavaScript counted the switches; integration to backend needs StreamlitComponent/WebSocket for automatic recording.
-    """)
-    st.warning("⚠️ Please visually check the 🔁 Tab Switches count displayed on top.")
+    st.warning(f"🔁 You switched tabs **{st.session_state.tab_switches}** times during the quiz.")
+    if st.session_state.tab_switches > 0:
+        st.warning("📉 Tab switching may affect evaluation credibility.")
+    else:
+        st.success("✅ No tab switches detected. Great focus!")
 
