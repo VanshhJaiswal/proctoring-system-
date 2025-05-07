@@ -1,6 +1,6 @@
 streamlit
-opencv-python-headless
+opencv-python
 mediapipe
 transformers
 requests
-torch
+Pillow
