@@ -1,4 +1,5 @@
 streamlit
 requests
 python-dotenv
-streamlit-camera-input-live
+opencv-python-headless
+numpy
