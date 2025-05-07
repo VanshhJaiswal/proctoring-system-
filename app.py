@@ -1,137 +1,135 @@
 import streamlit as st
-import requests
-import base64
+import random
+import time
 import os
-import groq
-import json
-from datetime import datetime
-from streamlit_js_eval import streamlit_js_eval
+import requests
 
-# Load API keys
-GOOGLE_VISION_API_KEY = os.getenv("GOOGLE_VISION_API_KEY")
+# ---------- ENVIRONMENT VARIABLES ----------
+from dotenv import load_dotenv
+load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# Initialize Groq client
-groq_client = groq.Client(api_key=GROQ_API_KEY)
+# ---------- INITIALIZATION ----------
+st.set_page_config(page_title="AI Proctored Quiz", layout="centered")
+if 'quiz_started' not in st.session_state:
+    st.session_state.quiz_started = False
+if 'questions' not in st.session_state:
+    st.session_state.questions = []
+if 'score' not in st.session_state:
+    st.session_state.score = 0
+if 'current_question' not in st.session_state:
+    st.session_state.current_question = 0
+if 'selected_answers' not in st.session_state:
+    st.session_state.selected_answers = []
+if 'tab_switch_count' not in st.session_state:
+    st.session_state.tab_switch_count = 0
 
-st.title("🎥 AI-Based Proctoring System with Quiz + Tab Switch Detection")
+# ---------- JAVASCRIPT: Tab Switch Detection ----------
+st.markdown("""
+<script>
+let hidden, visibilityChange; 
+if (typeof document.hidden !== "undefined") {
+  hidden = "hidden";
+  visibilityChange = "visibilitychange";
+}
+document.addEventListener(visibilityChange, function() {
+  if (document[hidden]) {
+    const currentCount = parseInt(localStorage.getItem("tabSwitchCount") || "0");
+    localStorage.setItem("tabSwitchCount", currentCount + 1);
+    const streamlitEvent = new Event("tabSwitchDetected");
+    window.dispatchEvent(streamlitEvent);
+  }
+});
+</script>
+""", unsafe_allow_html=True)
 
-# Initialize logs
-if 'logs' not in st.session_state:
-    st.session_state.logs = []
+# ---------- JAVASCRIPT: Webcam Access ----------
+st.markdown("""
+<h5>📸 Webcam Access Required for Proctoring</h5>
+<script>
+navigator.mediaDevices.getUserMedia({ video: true }).then(stream => {
+    const video = document.createElement('video');
+    video.srcObject = stream;
+    video.play();
+}).catch(err => {
+    alert("Webcam permission is required to continue!");
+});
+</script>
+""", unsafe_allow_html=True)
 
-def log_event(event_type, details=""):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    st.session_state.logs.append({"time": timestamp, "event": event_type, "details": details})
+# ---------- QUIZ CONFIG ----------
+st.title("🧠 AI Proctored Quiz App")
+st.markdown("Secure, smart, and monitored quiz system using Groq LLaMA3 and Streamlit.")
 
-# Detect tab switch using streamlit-js-eval
-result = streamlit_js_eval(js_expressions="document.visibilityState", key="vis_state")
+quiz_type = st.selectbox("📚 Select Quiz Type", ["Python", "Machine Learning", "HTML", "General Knowledge"])
+num_questions = st.slider("❓ Number of Questions", 3, 10, 5)
+duration_minutes = st.slider("⏰ Time Duration (in minutes)", 1, 10, 3)
 
-if result == "hidden":
-    log_event("Tab Switch Detected", "User switched away from exam tab!")
-    st.warning("⚠️ Tab switch detected! Please stay on this exam tab.")
+if st.button("✅ Start Quiz"):
+    st.session_state.quiz_started = True
+    st.session_state.tab_switch_count = 0
+    st.session_state.score = 0
+    st.session_state.current_question = 0
+    st.session_state.selected_answers = []
 
-# =========================
-# 1️⃣ Live Webcam Capture
-# =========================
+    with st.spinner("🧠 Generating questions using LLaMA3..."):
+        prompt = f"Generate {num_questions} multiple-choice questions on {quiz_type}. Format: Question, 4 options, and correct answer."
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "llama3-70b-8192",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.7
+        }
+        response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
+        res_text = response.json()["choices"][0]["message"]["content"]
 
-captured_image = st.camera_input("📸 Capture live photo for proctoring")
+        # Simple parser (assuming format is Question\nA.\nB.\nC.\nD.\nAnswer: X)
+        questions = []
+        blocks = res_text.split("Answer:")
+        for block in blocks[:-1]:
+            lines = block.strip().split("\n")
+            if len(lines) >= 5:
+                q = lines[0].strip()
+                options = [opt.strip("ABCD. ") for opt in lines[1:5]]
+                correct = blocks[blocks.index(block)+1].strip().split("\n")[0]
+                questions.append({"question": q, "options": options, "answer": correct.upper()})
+        st.session_state.questions = questions[:num_questions]
+        st.success("Questions loaded. Quiz will begin below.")
 
-if captured_image is not None:
-    st.image(captured_image, caption="Captured Image", use_column_width=True)
+# ---------- QUIZ TIMER + QUESTIONS ----------
+if st.session_state.quiz_started:
+    st.warning(f"🚨 Tab Switches Detected: {st.session_state.tab_switch_count}")
+    total_seconds = duration_minutes * 60
+    start_time = time.time()
 
-    # Encode image to base64
-    image_content = captured_image.getvalue()
-    encoded_image = base64.b64encode(image_content).decode('utf-8')
+    while st.session_state.current_question < len(st.session_state.questions):
+        elapsed = int(time.time() - start_time)
+        remaining = total_seconds - elapsed
+        if remaining <= 0:
+            st.error("⏰ Time's up!")
+            break
 
-    # Google Vision API endpoint
-    vision_api_url = f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_VISION_API_KEY}"
+        mins, secs = divmod(remaining, 60)
+        st.info(f"⏱️ Time Left: {mins:02}:{secs:02}")
 
-    # Prepare request payload
-    request_payload = {
-        "requests": [
-            {
-                "image": {"content": encoded_image},
-                "features": [{"type": "FACE_DETECTION"}]
-            }
-        ]
-    }
+        q_data = st.session_state.questions[st.session_state.current_question]
+        st.subheader(f"Q{st.session_state.current_question + 1}: {q_data['question']}")
+        answer = st.radio("Choose your answer:", q_data["options"], key=st.session_state.current_question)
 
-    with st.spinner("🔍 Analyzing image with Google Vision API..."):
-        response = requests.post(vision_api_url, json=request_payload)
-        result = response.json()
+        if st.button("Next Question"):
+            st.session_state.selected_answers.append(answer)
+            if answer.upper() == q_data["answer"]:
+                st.session_state.score += 1
+            st.session_state.current_question += 1
+            st.rerun()
 
-    try:
-        face_annotations = result["responses"][0].get("faceAnnotations", [])
-        num_faces = len(face_annotations)
-        alerts = []
+    if st.session_state.current_question == len(st.session_state.questions):
+        st.success("🎉 Quiz Completed!")
+        st.markdown(f"📝 Score: **{st.session_state.score}/{num_questions}**")
+        st.markdown(f"🚨 Tab Switches during quiz: **{st.session_state.tab_switch_count}**")
+        if st.session_state.tab_switch_count > 2:
+            st.error("⚠️ Multiple tab switches detected. This quiz attempt may be flagged.")
 
-        if num_faces == 0:
-            alerts.append("⚠️ No Face Detected")
-        elif num_faces > 1:
-            alerts.append("⚠️ Multiple Faces Detected")
-        else:
-            alerts.append("✅ Single Face Detected")
-
-        emotions = []
-        for face in face_annotations:
-            likelihood_map = {
-                "VERY_LIKELY": 5,
-                "LIKELY": 4,
-                "POSSIBLE": 3,
-                "UNLIKELY": 2,
-                "VERY_UNLIKELY": 1
-            }
-            if likelihood_map.get(face.get("joyLikelihood", "VERY_UNLIKELY"), 0) >= 3:
-                emotions.append("Joy")
-            if likelihood_map.get(face.get("angerLikelihood", "VERY_UNLIKELY"), 0) >= 3:
-                emotions.append("Anger")
-            if likelihood_map.get(face.get("sorrowLikelihood", "VERY_UNLIKELY"), 0) >= 3:
-                emotions.append("Sorrow")
-            if likelihood_map.get(face.get("surpriseLikelihood", "VERY_UNLIKELY"), 0) >= 3:
-                emotions.append("Surprise")
-
-        st.subheader("✅ Proctoring Analysis Results")
-        st.write(f"**Faces Detected:** {num_faces}")
-        st.write(f"**Alerts:** {', '.join(alerts)}")
-        st.write(f"**Emotions Detected:** {', '.join(emotions) if emotions else 'None'}")
-
-        log_event("Proctoring Analysis", f"Faces: {num_faces}, Alerts: {alerts}, Emotions: {emotions}")
-
-    except Exception as e:
-        st.error(f"❌ Error processing response: {e}")
-        st.json(result)  # for debugging
-
-# =========================
-# 2️⃣ Groq Quiz Generation
-# =========================
-
-if st.button("🎯 Generate AI Quiz Question"):
-    with st.spinner("🤖 Generating quiz using Groq..."):
-        prompt_text = "Generate one multiple-choice question on Python programming with 4 options and specify the correct answer."
-
-        chat_completion = groq_client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt_text}],
-            model="llama3-8b-8192"
-        )
-        quiz_content = chat_completion.choices[0].message.content
-        st.session_state.quiz_question = quiz_content
-        log_event("Quiz Generated", quiz_content)
-
-if "quiz_question" in st.session_state:
-    st.subheader("📝 AI-Generated Quiz")
-    st.markdown(st.session_state.quiz_question)
-    user_answer = st.text_input("Your Answer:")
-    if st.button("Submit Answer"):
-        log_event("Quiz Answer", f"User answered: {user_answer}")
-        st.success("✅ Answer submitted and logged!")
-
-# =========================
-# 3️⃣ Download Logs
-# =========================
-
-st.subheader("📄 Session Logs")
-st.json(st.session_state.logs)
-
-log_json = json.dumps(st.session_state.logs, indent=2)
-st.download_button("⬇️ Download Logs as JSON", log_json, file_name="proctoring_logs.json", mime="application/json")
