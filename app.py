@@ -1,135 +1,149 @@
 import streamlit as st
-import random
+import openai
 import os
-import requests
-from dotenv import load_dotenv
+import random
+import time
+import json
+import cv2
+import threading
 
-# Load env vars
-load_dotenv()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+# Load Groq API key from environment
+openai.api_key = os.getenv("GROQ_API_KEY")
+MODEL_NAME = "mixtral-8x7b-32768"
 
-# Page config
-st.set_page_config(page_title="AI Proctored Quiz", layout="centered")
+st.set_page_config(page_title="AI Proctored Quiz App", layout="wide")
 
-# Initialize session state
-if "quiz_started" not in st.session_state:
-    st.session_state.quiz_started = False
-if "questions" not in st.session_state:
-    st.session_state.questions = []
-if "submitted" not in st.session_state:
-    st.session_state.submitted = False
-if "user_answers" not in st.session_state:
-    st.session_state.user_answers = {}
-if "tab_switches" not in st.session_state:
-    st.session_state.tab_switches = 0
+# ---- Webcam Access Placeholder ----
+def start_webcam():
+    cap = cv2.VideoCapture(0)
+    while st.session_state.quiz_started and not st.session_state.submitted:
+        ret, frame = cap.read()
+        if ret:
+            # Can process frame here (e.g., face detection)
+            pass
+        time.sleep(1)
+    cap.release()
 
-# JavaScript for tab-switch detection
-st.markdown("""
+# ---- Tab Switch Detection ----
+tab_switch_script = """
 <script>
-let switchCount = 0;
-
-document.addEventListener('visibilitychange', function() {
+let count = 0;
+document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
-        switchCount += 1;
-        fetch("/tab_switch_detected?count=" + switchCount);
+        count += 1;
+        fetch(`/tab_switch?count=${count}`);
     }
 });
 </script>
-""", unsafe_allow_html=True)
+"""
 
-# Webcam access request
-st.markdown("""
-<script>
-navigator.mediaDevices.getUserMedia({ video: true })
-  .then(function(stream) {
-    // Permission granted
-  })
-  .catch(function(err) {
-    alert("📸 Webcam access is required for this proctored test.");
-  });
-</script>
-""", unsafe_allow_html=True)
+# ---- Streamlit Server Extension ----
+from streamlit.runtime.scriptrunner import get_script_run_ctx
+from streamlit.runtime.server import Server
 
-st.title("🎓 AI Proctored Quiz App")
-st.markdown("This quiz will monitor tab-switching and require webcam access.")
+def get_current_session():
+    session_id = get_script_run_ctx().session_id
+    server = Server.get_current()
+    session_infos = server._session_info_by_id
+    return session_infos[session_id].session
 
-# Selection
-quiz_topic = st.selectbox("🧠 Choose Quiz Topic", ["Python", "Machine Learning", "HTML", "General Knowledge"])
-num_questions = st.slider("🔢 Number of Questions", 3, 10, 5)
-duration = st.slider("⏰ Duration (Minutes)", 1, 10, 3)
+# ---- Inject Tab Switch Handler ----
+def inject_tab_switch_counter():
+    st.markdown(tab_switch_script, unsafe_allow_html=True)
 
-# Start Quiz
-if st.button("🚀 Start Quiz"):
-    st.session_state.quiz_started = True
-    st.session_state.tab_switches = 0
-    st.session_state.user_answers = {}
+# ---- Generate MCQs from Groq API ----
+def generate_mcqs(quiz_type, num_questions):
+    prompt = f"Generate {num_questions} multiple-choice questions (with 4 options each and correct answer marked) for a quiz on '{quiz_type}'. Respond in JSON list format with question, options, and answer."
+    response = openai.ChatCompletion.create(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "user", "content": prompt}
+        ]
+    )
+    content = response['choices'][0]['message']['content']
+    try:
+        questions = json.loads(content)
+    except json.JSONDecodeError:
+        st.error("Failed to parse question JSON from Groq response.")
+        return []
+    return questions
+
+# ---- Session State Defaults ----
+if 'quiz_started' not in st.session_state:
+    st.session_state.quiz_started = False
+if 'submitted' not in st.session_state:
     st.session_state.submitted = False
+if 'questions' not in st.session_state:
+    st.session_state.questions = []
+if 'tab_switches' not in st.session_state:
+    st.session_state.tab_switches = 0
+if 'user_answers' not in st.session_state:
+    st.session_state.user_answers = {}
 
-    with st.spinner("Generating quiz using Groq..."):
-        prompt = f"Generate {num_questions} multiple choice questions on {quiz_topic}. Format: Q: Question\\nA. Option1\\nB. Option2\\nC. Option3\\nD. Option4\\nAnswer: A/B/C/D"
-        headers = {
-            "Authorization": f"Bearer {GROQ_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": "llama3-70b-8192",
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.7
-        }
-        res = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
-        content = res.json()["choices"][0]["message"]["content"]
+# ---- Title & Setup ----
+st.title("🧠 AI Proctored Quiz App")
 
-        raw_blocks = content.split("Q:")
-        questions = []
+if not st.session_state.quiz_started:
+    with st.form("setup_form"):
+        quiz_type = st.text_input("📚 Quiz Topic (e.g., Python, History)")
+        num_questions = st.slider("🔢 Number of Questions", 1, 10, 5)
+        duration = st.slider("⏱️ Time Duration (minutes)", 1, 30, 5)
+        consent = st.checkbox("✅ I allow webcam and tab monitoring during quiz")
+        submitted = st.form_submit_button("Start Quiz")
 
-        for block in raw_blocks[1:]:
-            lines = block.strip().split("\n")
-            q_text = lines[0].strip()
-            options = [line[2:].strip() for line in lines[1:5]]
-            correct_line = [l for l in lines if l.startswith("Answer:")]
-            correct_answer = correct_line[0].split(":")[1].strip() if correct_line else "A"
-            questions.append({
-                "question": q_text,
-                "options": options,
-                "correct": correct_answer
-            })
+        if submitted:
+            if not consent:
+                st.error("You must allow webcam and monitoring to start the quiz.")
+            elif not quiz_type:
+                st.warning("Please enter a quiz topic.")
+            else:
+                st.session_state.questions = generate_mcqs(quiz_type, num_questions)
+                st.session_state.quiz_started = True
+                st.session_state.submitted = False
+                st.session_state.tab_switches = 0
+                threading.Thread(target=start_webcam).start()
+                st.success("Quiz started! Good luck!")
 
-        st.session_state.questions = questions
-
-# Display questions
+# ---- Quiz Active ----
 if st.session_state.quiz_started and st.session_state.questions and not st.session_state.submitted:
+    inject_tab_switch_counter()
     st.markdown(f"📵 **Tab Switch Count:** `{st.session_state.tab_switches}`")
     with st.form("quiz_form"):
+        answers = {}
         for i, q in enumerate(st.session_state.questions):
             st.write(f"**Q{i+1}. {q['question']}**")
-            st.session_state.user_answers[i] = st.radio("Choose:", q["options"], key=f"q{i}")
+            selected = st.radio("Choose:", q["options"], key=f"q{i}")
+            answers[i] = selected
+
         if st.form_submit_button("✅ Submit Quiz"):
+            st.session_state.user_answers = answers
             st.session_state.submitted = True
 
-# Display results
+# ---- Evaluation ----
 if st.session_state.submitted:
     score = 0
-    st.subheader("📊 Results")
+    st.success("🎉 Quiz Submitted!")
+    st.markdown("---")
     for i, q in enumerate(st.session_state.questions):
-        user_ans = st.session_state.user_answers[i]
-        correct_index = ord(q["correct"]) - ord("A")
-        correct_ans = q["options"][correct_index]
-
-        is_correct = user_ans == correct_ans
-        if is_correct:
+        user_ans = st.session_state.user_answers.get(i, "No answer")
+        correct = q["answer"]
+        st.write(f"**Q{i+1}:** {q['question']}")
+        st.write(f"🔹 Your Answer: `{user_ans}`")
+        st.write(f"✅ Correct Answer: `{correct}`")
+        if user_ans == correct:
             score += 1
+        st.markdown("---")
+    st.info(f"📊 Final Score: **{score} / {len(st.session_state.questions)}**")
+    st.warning(f"🕵️ Tabs switched during exam: **{st.session_state.tab_switches}**")
 
-        st.markdown(f"**Q{i+1}: {q['question']}**")
-        st.markdown(f"- ✅ Correct: **{correct_ans}**")
-        st.markdown(f"- 🧑 Your Answer: {'✅' if is_correct else '❌'} **{user_ans}**")
+# ---- Simulated API to Count Tab Switch ----
+from streamlit.web.server.websocket_headers import _get_websocket_headers
+from fastapi import FastAPI, Request
 
-    st.success(f"🎯 Your Score: **{score}/{len(st.session_state.questions)}**")
-    st.warning(f"🧩 Tab Switches Detected: **{st.session_state.tab_switches}**")
-    if st.session_state.tab_switches > 2:
-        st.error("⚠️ Your session is flagged due to excessive tab switching!")
+app = FastAPI()
 
-# Capture tab switch via Streamlit route (simulated here)
-# NOTE: This will not work unless you implement a backend route. For local demo, simulate tab switch manually:
-st.markdown("---")
-if st.button("🔄 Simulate Tab Switch"):
-    st.session_state.tab_switches += 1
+@app.get("/tab_switch")
+async def handle_tab_switch(request: Request):
+    session = get_current_session()
+    session._state["tab_switches"] += 1
+    return {"status": "ok"}
